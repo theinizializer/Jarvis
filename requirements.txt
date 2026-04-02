@@ -1,0 +1,41 @@
+# JARVIS v6.0 — Requirements
+# Install with: pip install -r requirements.txt
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+requests>=2.31.0
+numpy>=1.24.0
+scipy>=1.11.0         # audio resampling
+
+# ── AI / Ollama ───────────────────────────────────────────────────────────────
+ollama>=0.2.0
+
+# ── STT — Speech to Text ──────────────────────────────────────────────────────
+faster-whisper>=1.0.0
+
+# ── Audio I/O ─────────────────────────────────────────────────────────────────
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# ── TTS — Text to Speech ──────────────────────────────────────────────────────
+gTTS>=2.5.0
+
+# ── Speaker Verification (optional) ──────────────────────────────────────────
+resemblyzer>=0.1.4    # pip install resemblyzer
+# Note: requires torch — install separately if needed:
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# ── VAD — Voice Activity Detection (optional) ────────────────────────────────
+webrtcvad>=2.0.10
+
+# ── Web Search ────────────────────────────────────────────────────────────────
+ddgs>=0.1.0           # DuckDuckGo (renamed from duckduckgo_search)
+tavily-python>=0.3.0  # Tavily AI search (optional, needs API key)
+
+# ── Discord Bot (optional) ───────────────────────────────────────────────────
+discord.py>=2.3.0
+
+# ── System packages (install via apt, not pip) ────────────────────────────────
+# sudo apt install mpg123          # TTS audio player
+# sudo apt install pulseaudio      # microphone support
+# sudo apt install parecord        # audio recording
+# sudo apt install docker.io       # for SearXNG (optional)

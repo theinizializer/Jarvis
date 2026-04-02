@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: jarvis-searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - searxng-data:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  searxng-data:
