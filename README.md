@@ -43,7 +43,7 @@ Docker (optional) — for local SearXNG
 ### 2. Clone the project
 
 ```bash
-git clone https://github.com/tuousername/jarvis.git
+git clone https://github.com/theinizializer/jarvis.git
 cd jarvis
 ```
 
