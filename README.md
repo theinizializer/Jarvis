@@ -1,151 +1,231 @@
 # 🤖 JARVIS v6.0
 
-Local personal AI assistant based on Ollama
-, with voice support, web search, Discord bot, and persistent memory. Runs completely offline on your machine — no data is sent to external servers (except optional web searches).
+> Local personal AI assistant — voice, web search, Discord, persistent memory.  
+> Runs **completely offline** on your machine. No data sent to external servers (except optional web searches).
+
 ---
 
 ## ✨ Features
 
-💬 Text and voice chat — interact with JARVIS via keyboard or microphone
-🎙️ Wake word "Jarvis" — voice activation with fuzzy matching (works with different accents and pronunciations)
-🔒 Speaker verification — JARVIS responds only to your voice (optional, requires resemblyzer)
-🔊 TTS — text-to-speech using gTTS
-🧠 Persistent memory — remembers facts about you between sessions
-💻 Terminal command execution — JARVIS can run shell commands with confirmation
-🌍 Multilingual — Italian, French, English, German, Spanish, and more (16 languages)
-🔍 Web search — weather, news, Wikipedia, general search (via SearXNG, Brave, DDG, Tavily)
-💙 Discord bot — use JARVIS directly from Discord
+| Feature | Description |
+|---------|-------------|
+| 💬 **Text & Voice** | Keyboard or microphone — your choice |
+| 🎙️ **Wake Word** | Say "Jarvis" to activate — fuzzy matching for accents |
+| 😴 **Sleep Word** | "Jarvis dormi/sleep/dors" — closes session |
+| 🔒 **Speaker Verification** | JARVIS responds only to your voice |
+| 🔊 **TTS** | Text-to-speech with automatic microphone mute |
+| 🧠 **Persistent Memory** | Remembers facts between sessions |
+| 💻 **Terminal Commands** | Run shell commands with confirmation |
+| 🌍 **16 Languages** | IT, FR, EN, DE, ES, PT, ZH, JA, KO, AR, RU, NL, PL, TR, SV, LB |
+| 🔍 **Web Search** | SearXNG → Tavily → Brave → DDG → Wikipedia |
+| 💙 **Discord Bot** | Use JARVIS directly from Discord |
+| 🥽 **AR Glasses** | Raspberry Pi 5 support with auto-discovery |
+
 ---
 
 ## 📁 Project Structure
 
 ```
-jarvis_v6.py        ← main core: loop, Ollama, Discord, memory, terminal
+jarvis_v6.py        ← main core: Ollama, memory, terminal, Discord
 voice_module.py     ← STT (Whisper), TTS (gTTS), wake word, speaker verification
-search_module.py    ← web search (SearXNG, Brave, DDG, Wikipedia, weather, news)
-language_module.py  ← multi-language localization (wake word, commands, UI messages)
-installer.py        ← installs everything and configures API keys
+search_module.py    ← web search backends with fallback chain
+language_module.py  ← localization for 16 languages
+jarvis_rasp.py      ← Raspberry Pi version (AR glasses)
+installer.py        ← automatic setup
+Modelfile           ← Ollama model configuration
+docker-compose.yml  ← SearXNG local search engine
 ```
 
 ---
 
-## 🚀 Quick Installation
+## 🚀 Installation
 
-### 1. Requisiti di sistema
+### Requirements
 
-Python 3.10+
-Ollama
- — for the local AI model
-PulseAudio — for microphone (Linux): sudo apt install pulseaudio
-mpg123 — for TTS: sudo apt install mpg123
-Docker (optional) — for local SearXNG
-
-### 2. Clone the project
+- Python 3.10+
+- [Ollama](https://ollama.com) — local AI model
+- Linux with PulseAudio/PipeWire (macOS/Windows: partial support)
 
 ```bash
-git clone https://github.com/theinizializer/jarvis.git
-cd jarvis
+sudo apt install pulseaudio mpg123 parecord  # Ubuntu/Debian
 ```
 
-### 3. Run the installer
+### Quick Start
 
 ```bash
-python installer.py
+git clone https://github.com/theinizializer/Jarvis.git
+cd Jarvis
+pip install -r requirements.txt
 ```
-The installer will automatically create:
 
-jarvisenv/ — Python virtual environment with all dependencies
-.env — file with your API keys (not committed to git)
-avvia_jarvis.sh — quick start script
-
-### 4. Create the Ollama model
-
-Before starting JARVIS, you need a configured Ollama model. You can use any installed model, for example:
+### Create the Ollama model
 
 ```bash
 ollama pull qwen2.5:7b
-
 ollama create jarvisQwen -f Modelfile
 ```
 
-### 5. Start Jarvis
+### Start JARVIS
 
 ```bash
-./avvia_jarvis.sh
+python jarvis_v6.py
+```
+
+On first run, JARVIS will ask you to choose a language — this is saved and never asked again.
+
+---
+
+## 🔍 Web Search Setup
+
+JARVIS uses a fallback chain — configure what you have, skip the rest.
+
+| Backend | Type | Setup |
+|---------|------|-------|
+| **SearXNG** ⭐ | Self-hosted, unlimited | `docker compose up -d` |
+| **Tavily** | API, 1000 req/month free | [tavily.com](https://tavily.com) → `TAVILY_API_KEY` in `.env` |
+| **Brave** | API, 2000 req/month free | [brave search](https://api.search.brave.com) → `BRAVE_API_KEY` in `.env` |
+| **DuckDuckGo** | Free, no key | Automatic fallback |
+| **Wikipedia** | Free, no key | Always available |
+| **Open-Meteo** | Free, no key | Weather forecasts |
+
+```bash
+# Start SearXNG locally (recommended)
+docker compose up -d
 ```
 
 ---
 
-## 🔍 Web Search — Configuration
+## 🌍 Languages
 
-JARVIS supports multiple search backends, in priority order:
+Supports 16 languages — everything adapts: wake word, sleep word, commands, TTS, UI messages.
 
-| Backend        | Type                           | How to configure                                                                 |
-| -------------- | ------------------------------ | -------------------------------------------------------------------------------- |
-| **SearXNG**    | Self-hosted, free, recommended | `docker run -d -p 8080:8080 searxng/searxng`                                     |
-| **Tavily**     | API, free tier                 | [tavily.com](https://tavily.com) → `TAVILY_API_KEY` in `.env`                    |
-| **Brave**      | API, free tier                 | [api.search.brave.com](https://api.search.brave.com) → `BRAVE_API_KEY` in `.env` |
-| **DuckDuckGo** | Free, no key                   | Automatic fallback                                                               |
-| **Wikipedia**  | Free, no key                   | Always available                                                                 |
-| **Open-Meteo** | Free, no key                   | Always available (weather)                                                       |
-| **ANSA RSS**   | Free, no key                   | Automatic fallback (news)                                                        |
-
-
-If you don’t configure anything, JARVIS will use DuckDuckGo and Wikipedia for free.
+```
+🇮🇹 Italiano  🇫🇷 Français  🇬🇧 English   🇩🇪 Deutsch
+🇪🇸 Español   🇵🇹 Português  🇨🇳 中文       🇯🇵 日本語
+🇰🇷 한국어     🇸🇦 العربية    🇷🇺 Русский    🇳🇱 Nederlands
+🇵🇱 Polski    🇹🇷 Türkçe     🇸🇪 Svenska    🇱🇺 Lëtzebuergesch
+```
 
 ---
 
-## 🌍 Supported Languages
+## 💬 Commands (slash)
 
-Italiano, Français, English, Deutsch, Español, Português, 中文, 日本語, 한국어, العربية, Русский, Nederlands, Polski, Türkçe, Svenska, Lëtzebuergesch
+All commands use `/` — works in both keyboard and voice mode.
 
-Change language with the command: /change language (or equivalent in the active language)
+| Command | Description |
+|---------|-------------|
+| `/remember <fact>` | Save to persistent memory |
+| `/memory` | Show everything remembered |
+| `/forget all` | Clear all memory |
+| `/language` | Current language |
+| `/change language` | Switch language |
+| `/add language` | Add a language |
+| `/search <query>` | Explicit web search |
+| `/weather <city>` | Weather forecast |
+| `/news` | Latest news |
+| `/wiki <topic>` | Wikipedia search |
+| `/tts` | Toggle voice on/off |
+| `/mode` | Switch keyboard ↔ microphone |
+| `/stats` | Session statistics |
+| `/help` | Show all commands |
+| `/exit` | Close JARVIS |
 
----
-
-## 💬 Main Commands
-
-| Command            | Description                            |
-| ------------------ | -------------------------------------- |
-| `/remember <fact>` | Save a fact in persistent memory       |
-| `/memory`          | Show everything JARVIS remembers       |
-| `/forget all`      | Clear all memory                       |
-| `/search <query>`  | Explicit web search                    |
-| `/weather <city>`  | Current weather and forecast           |
-| `/news`            | Latest news                            |
-| `/wiki <topic>`    | Wikipedia search                       |
-| `/language`        | Show current language                  |
-| `/change language` | Change language                        |
-| `/tts`             | Enable/disable voice                   |
-| `/mode`            | Switch between keyboard and microphone |
-| `/stats`           | Session statistics                     |
-| `/exit`            | Close JARVIS                           |
-
+> Commands are **fully localized** — in French use `/changer langue`, in German `/sprache wechseln`, etc.
 
 ---
 
-## 🔑 API Key
+## 🔒 Speaker Verification (optional)
 
-API keys are configured in the .env file (created by the installer). Never commit this file to git.
+JARVIS can learn your voice and ignore everyone else — including itself.
+
+```bash
+# Set up voice profile (speak for 10 seconds)
+HIP_VISIBLE_DEVICES=-1 python voice_module.py --setup-speaker
+```
+
+On AMD GPUs, always set `HIP_VISIBLE_DEVICES=-1` to force CPU mode for resemblyzer.
+
+---
+
+## 🥽 Raspberry Pi / AR Glasses
+
+`jarvis_rasp.py` connects to your main PC over the local network — the AI model runs on the PC, commands execute on the Raspberry Pi.
+
+```bash
+# On your main PC — allow Ollama network connections
+sudo systemctl edit ollama
+# Add: Environment="OLLAMA_HOST=0.0.0.0:11434"
+sudo systemctl restart ollama
+
+# On Raspberry Pi — auto-discovers the PC
+python jarvis_rasp.py
+```
+
+---
+
+## 🔑 API Keys (.env)
 
 ```env
-DISCORD_TOKEN=...      # Discord bot token (optional)
-BRAVE_API_KEY=...      # Brave Search (optional, free tier)
-GNEWS_API_KEY=...      # GNews (optional, free tier)
-TAVILY_API_KEY=...     # Tavily AI search (optional, free tier)
+DISCORD_TOKEN=...      # Discord bot (optional)
+BRAVE_API_KEY=...      # Brave Search (optional)
+GNEWS_API_KEY=...      # GNews (optional)
+TAVILY_API_KEY=...     # Tavily AI search (optional)
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+**`PaErrorCode -9997` — Invalid sample rate**  
+Your microphone uses a different sample rate. JARVIS auto-detects it, but if it fails:
+```bash
+python3 -c "import sounddevice as sd; print(sd.query_devices(kind='input'))"
+```
+
+**`HIP error` on AMD GPU**  
+resemblyzer tries to use the AMD GPU. Force CPU:
+```bash
+HIP_VISIBLE_DEVICES=-1 python jarvis_v6.py
+```
+
+**Whisper not transcribing / hallucinating**  
+Try a larger model — edit `WHISPER_MODEL_SIZE` in `voice_module.py`:
+```python
+WHISPER_MODEL_SIZE = "medium"  # or "large-v3" for best accuracy
+```
+
+**JARVIS hears itself speaking**  
+Use headphones/earphones — the microphone won't pick up the speaker output.  
+Or set up speaker verification so JARVIS ignores its own voice.
+
+**`parecord: command not found`**  
+```bash
+sudo apt install pulseaudio-utils
+```
+
+**TTS not working**  
+```bash
+sudo apt install mpg123
+which mpg123  # should print /usr/bin/mpg123
 ```
 
 ---
 
 ## 🤝 Contributing
 
-The project is open source — pull requests and issues are welcome! If you add a language, a search backend, or a feature, open a PR.
+PRs and issues welcome! If you add a language, search backend, or feature — open a PR.
+
+1. Fork the repo
+2. Create a branch: `git checkout -b feature/my-feature`
+3. Commit and push
+4. Open a Pull Request
 
 ---
 
 ## 📄 License
+
 MIT License — see [LICENSE](LICENSE)
 
-## Voice Recognition
+---
 
-HIP_VISIBLE_DEVICES=-1 python3 voice_module.py --setup-speaker
+*Inspired by Iron Man's JARVIS. Built by a student from Luxembourg 🇱🇺 as a passion project.*
