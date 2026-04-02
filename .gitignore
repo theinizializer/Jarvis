@@ -205,3 +205,76 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# ── Ambiente virtuale Python ──────────────────────────────────────────────────
+jarvisenv/
+.venv/
+venv/
+env/
+
+# ── API Key e segreti — NON committare mai! ───────────────────────────────────
+.env
+*.env
+.env.local
+.env.*.local
+
+# ── Dati personali di JARVIS ──────────────────────────────────────────────────
+# La cartella jarvis_memory contiene ricordi e profilo vocale personali
+jarvis_memory/
+speaker_profile.npy
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# ── Editor e IDE ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# ── Sistema operativo ─────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# ── Log e file temporanei ─────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.orig
+# ── Audio ─────────────────────────────────────────────────────────
+*.wav
+*.mp3
+*.ogg
+
+# ── AI Models ─────────────────────────────────────────────────────
+models/
+*.bin
+*.gguf
+*.pt
+
+# ── Cache ─────────────────────────────────────────────────────────
+.cache/
