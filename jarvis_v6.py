@@ -458,6 +458,11 @@ def _scan_pactl() -> list[dict]:
 
 
 from language_module import LanguageManager, ALL_LANGUAGES
+try:
+    from agent_module import JarvisAgent, should_use_agent
+    AGENT_OK = True
+except ImportError:
+    AGENT_OK = False
 from voice_module import (
     scan_microphones, choose_microphone, find_tts_player,
     VoiceInput, TTSEngine, SpeakerVerifier, VoiceModule,
@@ -727,6 +732,7 @@ class Jarvis:
         self.tts_lang   = tts_lang
         self.sys_lang   = system_lang or _SYSTEM_LANG
         self._lang      = None  # impostato da main() dopo init
+        self._agent     = None  # impostato dopo init se AGENT_OK
         self.sudo_pass  = sudo_password
         self.tts_on     = enable_tts and GTTS_OK
         self.disc_on    = enable_discord and DISCORD_OK and bool(DISCORD_TOKEN)
@@ -755,7 +761,7 @@ class Jarvis:
                     searxng_url=searxng_url,
                     brave_api_key=brave_api_key,
                     gnews_key=gnews_key,
-                    tavily_key=os.environ.get("TAVILY_API_KEY", "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"),
+                    tavily_key=os.environ.get("TAVILY_API_KEY", ""),
                 )
             except Exception as e:
                 print(f"⚠️  SearchModule non inizializzato: {e}")
@@ -857,9 +863,12 @@ class Jarvis:
                 "en": "ALWAYS RESPOND IN ENGLISH ONLY. Never in Chinese or other languages.",
             }.get(self.tts_lang, "ALWAYS RESPOND IN ENGLISH ONLY.")
 
+        user = os.getenv('USER', 'user')
         return (
+            f"You are JARVIS, personal AI assistant of {user}. "
+            f"Your name is JARVIS. User's name is {user}. | "
             f"{lang_instruction} | "
-            f"Dir: {self.cwd} | User: {os.getenv('USER','user')} | "
+            f"Dir: {self.cwd} | User: {user} | "
             f"Ora: {datetime.now().strftime('%H:%M')} | "
             f"Desktop={self._xdg('desktop')} | "
             f"Downloads={self._xdg('downloads')} | "
@@ -882,13 +891,12 @@ class Jarvis:
             "function": {
                 "name": "execute_terminal_command",
                 "description": (
-                    "Esegui un comando Linux sul terminale. "
-                    "Usalo per: file, cartelle, programmi, installazioni, configurazioni. "
-                    "NON usarlo per cercare info su internet — per quello usa web_search. "
+                    "Execute a Linux terminal command. "
+                    "Use for: files, folders, programs, installations, configurations. "
                     f"Desktop={self._xdg('desktop')} "
                     f"Downloads={self._xdg('downloads')} "
                     f"Documents={self._xdg('documents')}. "
-                    "PATH ASSOLUTI per rm/mv/cp. CASE SENSITIVE."
+                    "ABSOLUTE PATHS for rm/mv/cp. CASE SENSITIVE."
                 ),
                 "parameters": {
                     "type": "object",
@@ -901,6 +909,35 @@ class Jarvis:
             }
         }]
 
+        # web_search sempre disponibile se search module presente
+        if self.search:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": (
+                        "Search the internet for any information. "
+                        "Use for: flights, hotels, prices, weather, news, restaurants, "
+                        "products, events, people, places — anything that needs current data. "
+                        "No restrictions on what you can search. "
+                        "Always search instead of guessing or making up information."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query — precise and specific"
+                            },
+                            "explanation": {
+                                "type": "string",
+                                "description": "Why you are searching"
+                            },
+                        },
+                        "required": ["query", "explanation"],
+                    }
+                }
+            })
 
         return tools
 
@@ -1258,7 +1295,15 @@ class Jarvis:
 
         if _RE_HOME_ERR.search(cmd):
             user = os.getenv('USER', 'user')
-            msg  = f"❌ PATH ERRATO! Usa ~ o /home/{user}/"
+            _path_err = {
+                "it": f"❌ PATH ERRATO! Usa ~ o /home/{user}/",
+                "fr": f"❌ CHEMIN INCORRECT ! Utilisez ~ ou /home/{user}/",
+                "en": f"❌ WRONG PATH! Use ~ or /home/{user}/",
+                "de": f"❌ FALSCHER PFAD! Verwende ~ oder /home/{user}/",
+                "es": f"❌ RUTA INCORRECTA! Usa ~ o /home/{user}/",
+            }.get(self.tts_lang if hasattr(self, 'tts_lang') else 'en',
+                  f"❌ WRONG PATH! Use ~ or /home/{user}/")
+            msg  = _path_err
             print(msg); return {"status": "error", "output": msg}
 
         if cmd == 'echo' or cmd.startswith('echo '):
@@ -1309,14 +1354,24 @@ class Jarvis:
         if DESTRUCTIVE.search(cmd):
             cmd = self._handle_rm_generic(cmd)
             if cmd is None:
-                return {"status": "denied", "output": "Annullato"}
+                return {"status": "denied", "output": getattr(self, "_cancelled_msg", "❌ Cancelled")}
             resolved = self._resolve_rm_path(cmd)
             if resolved is None:
                 return {"status": "error", "output": "Target non trovato"}
             cmd = resolved
-            if not self._confirm(f"⚠️  DISTRUTTIVO — Eseguire '{cmd}'?"):
+            # Messaggio conferma localizzato
+        _destr_msg = {
+            "it": f"DISTRUTTIVO — Eseguire '{cmd}'?",
+            "fr": f"DESTRUCTIF — Exécuter '{cmd}' ?",
+            "en": f"DESTRUCTIVE — Execute '{cmd}'?",
+            "de": f"DESTRUKTIV — Ausführen '{cmd}'?",
+            "es": f"DESTRUCTIVO — ¿Ejecutar '{cmd}'?",
+            "pt": f"DESTRUTIVO — Executar '{cmd}'?",
+        }.get(self.tts_lang if hasattr(self, 'tts_lang') else 'en',
+              f"DESTRUCTIVE — Execute '{cmd}'?")
+        if not self._confirm(_destr_msg):
                 self._stats["denied"] += 1
-                return {"status": "denied", "output": "❌ Annullato"}
+                return {"status": "denied", "output": getattr(self, "_cancelled_msg", "❌ Cancelled")}
         # Tutti gli altri comandi: esegui direttamente, nessuna conferma
 
         self._stats["cmds"] += 1
@@ -1491,12 +1546,56 @@ class Jarvis:
         return any(c.startswith(p) for p in self.SAFE_PFX)
 
     def _confirm(self, prompt):
+        # Risposte positive localizzate
+        _yes = {
+            "it": ("SI", "SÌ", "S", "YES", "Y"),
+            "fr": ("OUI", "O", "YES", "Y"),
+            "en": ("YES", "Y"),
+            "de": ("JA", "J", "YES", "Y"),
+            "es": ("SI", "SÍ", "S", "YES", "Y"),
+            "pt": ("SIM", "S", "YES", "Y"),
+            "ru": ("ДА", "Д", "YES", "Y"),
+            "nl": ("JA", "J", "YES", "Y"),
+            "pl": ("TAK", "T", "YES", "Y"),
+            "tr": ("EVET", "E", "YES", "Y"),
+            "sv": ("JA", "J", "YES", "Y"),
+        }
+        lang = self.tts_lang if hasattr(self, 'tts_lang') else "en"
+        yes_words = _yes.get(lang, _yes["en"])
+
+        # Label SI/no localizzato
+        _label = {
+            "it": "SI/no", "fr": "OUI/non", "en": "YES/no",
+            "de": "JA/nein", "es": "SÍ/no", "pt": "SIM/não",
+            "ru": "ДА/нет", "nl": "JA/nee", "pl": "TAK/nie",
+            "tr": "EVET/hayır", "sv": "JA/nej",
+        }
+        label = _label.get(lang, "YES/no")
+
+        # Annullato localizzato
+        _cancelled = {
+            "it": "❌ Annullato", "fr": "❌ Annulé", "en": "❌ Cancelled",
+            "de": "❌ Abgebrochen", "es": "❌ Cancelado", "pt": "❌ Cancelado",
+            "ru": "❌ Отменено", "nl": "❌ Geannuleerd", "pl": "❌ Anulowano",
+            "tr": "❌ İptal edildi", "sv": "❌ Avbrutet",
+        }
+        self._cancelled_msg = _cancelled.get(lang, "❌ Cancelled")
+
         if _voice_mode_active and _active_voice_input is not None:
-            self._tts_say(f"Conferma: {prompt}. Sì o No?")
-            return _voice_confirm(prompt, _active_voice_input)
+            # TTS nella lingua corrente
+            _confirm_tts = {
+                "it": f"Conferma: {prompt}. Sì o No?",
+                "fr": f"Confirmation : {prompt}. Oui ou Non ?",
+                "en": f"Confirm: {prompt}. Yes or No?",
+                "de": f"Bestätigung: {prompt}. Ja oder Nein?",
+                "es": f"Confirmar: {prompt}. ¿Sí o No?",
+                "pt": f"Confirmar: {prompt}. Sim ou Não?",
+            }
+            self._tts_say(_confirm_tts.get(lang, f"Confirm: {prompt}. Yes or No?"))
+            return _voice_confirm(prompt, _active_voice_input, lang=lang)
         else:
-            risposta = input(f"\n⚠️  {prompt} (SI/no): ").strip().upper()
-            return risposta == 'SI'
+            risposta = input(f"\n⚠️  {prompt} ({label}): ").strip().upper()
+            return risposta in yes_words
 
     def _extract_echo(self, cmd):
         for pat in (_RE_ECHO_DBL, _RE_ECHO_SGL, _RE_ECHO_RAW):
@@ -1523,18 +1622,18 @@ class Jarvis:
         entry = {"timestamp": datetime.now().isoformat(), "fact": fact}
         self.permanent.append(entry)
         self._save_json(self.mem_dir / "permanent.json", self.permanent)
-        return self._lang.t("memorized", fact=fact) if self._lang else f"✅ Memorizzato: '{fact}'"
+        return f"✅ Memorizzato: '{fact}'"
 
     def show_memory(self):
         if not self.permanent:
-            return self._lang.t("memory_empty") if self._lang else "📭 Nessuna memoria"
+            return "📭 Nessuna memoria"
         lines = [f"  {i+1}. {m.get('fact','')}" for i, m in enumerate(self.permanent)]
-        return "📝\n" + "\n".join(lines)
+        return "📝 Memoria:\n" + "\n".join(lines)
 
     def forget_all(self):
         self.permanent.clear()
         self._save_json(self.mem_dir / "permanent.json", self.permanent)
-        return self._lang.t("memory_cleared") if self._lang else "🗑️ Memoria cancellata"
+        return "🗑️ Memoria cancellata"
 
     def _tts_say(self, text):
         if not self.tts_on or not text or len(text) < 4 or self._tts_q is None:
@@ -1624,64 +1723,96 @@ class Jarvis:
         # Comandi slash
         if user_msg.strip().startswith('/') and self._lang:
             result = self._lang.handle_slash(user_msg.strip())
-            if result == "__STATS__":
-                result = None  # gestito sotto
-            elif result == "__TTS__":
-                self.tts_on = not self.tts_on
-                return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
-            elif result:
-                # Aggiorna lingua TTS e sys_lang dopo cambio lingua
-                self.tts_lang = self._lang.tts_lang
-                self.sys_lang = self._lang.current
+            if result:
+                self.tts_lang = self._lang.tts_lang  # aggiorna lingua TTS
                 return result
 
-        if lower in ('stats', 'info'):
-            s = self._stats
-            return (
-                f"📊 Chiamate: {s['calls']} | Comandi: {s['cmds']} | "
-                f"Negati: {s['denied']}\n"
-                f"📂 Dir: {self.cwd} | 🤖 {self.model} | 💾 {len(self.permanent)} | "
-                f"🧵 {_CPU_THREADS} thread CPU"
-            )
-        if re.match(r'^(memorizza|remember|mémorise|memorize|/remember|/memorizza|/mémoriser)\s+', lower) or            (user_msg.strip().startswith('/') and re.match(r'^/(remember|memorizza|mémoriser|merken|recordar|lembrar|запомни|記住|zapamiętaj|hatırla|onthalen)\s+', lower)):
-            # Estrai il fatto (rimuovi il comando)
-            fact = re.sub(r'^[/\w]+\s+', '', user_msg, count=1, flags=re.IGNORECASE).strip()
-            if fact:
-                return self.memorize(fact)
-        if lower in ('memoria', 'ricordi', 'memory', 'memories', 'mémoire', 'souvenirs',
-                      'gedächtnis', 'erinnerung', 'geheugen', 'pamięć', 'bellek', 'minne',
-                      'erënnerung', 'память', '記憶', '記憶', '기억', 'الذاكرة'):
-            return self.show_memory()
-        if lower in ('dimentica tutto', 'forget all', 'oublier tout', 'alles vergessen',
-                     'vergeet alles', 'zapomnij wszystko', 'hepsini unut', 'glöm allt',
-                     'alles vergiessen', 'забудь всё', '忘记一切', 'すべて忘れる', '모두 잊어'):
-            return self.forget_all()
-        if lower == 'tts':
-            self.tts_on = not self.tts_on
-            return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
-        if lower in ('modalità', 'modalita', 'mode', 'cambia modalità',
-                     'cambia modalita', 'passa a vocale', 'passa a tastiera'):
-            return "__SWITCH_MODE__"
+        # ── Tutti i comandi passano dal / ──────────────────────────────────────
+        if lower.startswith('/'):
+            cmd_part = lower.split()[0]
+            rest     = user_msg.strip()[len(cmd_part):].strip()
 
-        # Comandi manuali search
-        if self.search:
-            if lower.startswith('cerca ') or lower.startswith('ricerca '):
-                q = re.sub(r'^(cerca|ricerca)\s+', '', user_msg, flags=re.IGNORECASE).strip()
-                return self.search.search(q)
-            if lower.startswith('meteo ') or lower.startswith('tempo a '):
-                c = re.sub(r'^(meteo|tempo a|tempo in)\s+', '', user_msg, flags=re.IGNORECASE).strip()
-                return self.search.meteo(c)
-            if lower in ('notizie', 'news', 'ultime notizie'):
-                return self.search.notizie()
-            if lower.startswith('notizie '):
-                return self.search.notizie(user_msg[8:].strip())
-            if lower.startswith('wiki ') or lower.startswith('wikipedia '):
-                q = re.sub(r'^(wiki|wikipedia)\s+', '', user_msg, flags=re.IGNORECASE).strip()
-                return self.search.wikipedia(q)
-            if lower == 'ricerche':
-                return self.search.status()
-            if lower == 'svuota cache':
-                return self.search.clear_cache()
+            # Comandi universali (tutte le lingue)
+            if cmd_part in ('/stats', '/info'):
+                s = self._stats
+                return (
+                    f"📊 Chiamate: {s['calls']} | Comandi: {s['cmds']} | "
+                    f"Negati: {s['denied']}\n"
+                    f"📂 Dir: {self.cwd} | 🤖 {self.model} | 💾 {len(self.permanent)} | "
+                    f"🧵 {_CPU_THREADS} thread CPU"
+                )
+            if cmd_part in ('/tts',):
+                self.tts_on = not self.tts_on
+                return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
+            if cmd_part in ('/agente', '/agent', '/agentic', '/auto'):
+                # Forza modalità agente per il prossimo messaggio
+                rest_agent = rest.strip()
+                if rest_agent and AGENT_OK and self._agent:
+                    return self._agent.run(rest_agent, history=list(self._history))
+                elif not AGENT_OK:
+                    return "❌ agent_module.py non trovato"
+                return "⚠️  Uso: /agente <obiettivo>"
+            if cmd_part in ('/modalità', '/modalita', '/mode', '/vocale', '/tastiera',
+                            '/clavier', '/keyboard', '/tastatur', '/teclado'):
+                return "__SWITCH_MODE__"
+            if cmd_part in ('/esci', '/exit', '/quit', '/sortir', '/beenden',
+                            '/salir', '/sair', '/выход', '/終了'):
+                return "__EXIT__"
+
+            # Comandi memoria — tutte le lingue
+            _remember_cmds = ('/memorizza', '/remember', '/mémorise', '/memorize',
+                               '/merken', '/recordar', '/lembrar', '/запомни',
+                               '/記住', '/onthouden', '/zapamiętaj', '/hatırla',
+                               '/kom ihåg', '/onthalen')
+            _memory_cmds   = ('/memoria', '/ricordi', '/memory', '/mémoire',
+                               '/gedächtnis', '/erinnerung', '/geheugen', '/pamięć',
+                               '/bellek', '/minne', '/erënnerung', '/память',
+                               '/記憶', '/기억')
+            _forget_cmds   = ('/dimentica', '/forget', '/oublier', '/vergessen',
+                               '/vergeten', '/zapomnij', '/unut', '/glöm',
+                               '/vergiessen', '/забудь', '/忘记', '/忘れる')
+
+            if cmd_part in _remember_cmds:
+                if rest:
+                    return self.memorize(rest)
+                # Messaggio uso localizzato
+                _use_msg = {
+                    "it": "⚠️  Uso: /memorizza <fatto>",
+                    "fr": "⚠️  Usage : /mémoriser <fait>",
+                    "en": "⚠️  Usage: /remember <fact>",
+                    "de": "⚠️  Verwendung: /merken <fakt>",
+                }.get(self.tts_lang, "⚠️  Usage: /remember <fact>")
+                return _use_msg
+            if cmd_part in _memory_cmds:
+                return self.show_memory()
+            if cmd_part in _forget_cmds:
+                return self.forget_all()
+
+            # Meteo — NON rimuovere, è utile come comando diretto
+            if self.search:
+                if cmd_part in ('/meteo', '/tempo', '/weather', '/wetter',
+                                '/météo', '/tiempo', '/tempo', '/погода'):
+                    if rest:
+                        return self.search.meteo(rest)
+                    _use_meteo = {
+                        "it": "⚠️  Uso: /meteo <città>",
+                        "fr": "⚠️  Usage : /météo <ville>",
+                        "en": "⚠️  Usage: /weather <city>",
+                    }.get(self.tts_lang, "⚠️  Usage: /weather <city>")
+                    return _use_meteo
+                if cmd_part in ('/notizie', '/news', '/nouvelles', '/nachrichten', '/новости'):
+                    return self.search.notizie(rest or None)
+                if cmd_part in ('/wiki', '/wikipedia'):
+                    if rest:
+                        return self.search.wikipedia(rest)
+                    return "⚠️  /wiki <topic>"
+                # NOTA: /cerca RIMOSSO — le ricerche web le fa il modello con Tavily
+                # Il modello usa web_search tool automaticamente quando serve
+
+        # Attiva agente per richieste complesse
+        if AGENT_OK and self._agent and should_use_agent(user_msg):
+            print("\n🤖 Rilevata richiesta complessa — attivo agente", flush=True)
+            return self._agent.run(user_msg, history=list(self._history))
 
         vision = self._needs_vision(user_msg)
         self._executed_cmds.clear()
@@ -1851,6 +1982,11 @@ class Jarvis:
             self.tts_on = not self.tts_on
             return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}", output_lines
 
+        # Attiva agente per richieste complesse
+        if AGENT_OK and self._agent and should_use_agent(user_msg):
+            print("\n🤖 Rilevata richiesta complessa — attivo agente", flush=True)
+            return self._agent.run(user_msg, history=list(self._history))
+
         vision = self._needs_vision(user_msg)
         self._executed_cmds.clear()
 
@@ -2019,7 +2155,7 @@ class Jarvis:
 
 
 # ─── Loop vocale ──────────────────────────────────────────────────────────────
-def voice_loop(jarvis: Jarvis, voice_input: VoiceInput, lang_mgr=None) -> bool:
+def voice_loop(jarvis: Jarvis, voice_input: VoiceInput) -> bool:
     session = WakeWordSession(timeout=WAKE_SESSION_TIMEOUT)
 
     if not voice_input.is_ready():
@@ -2042,7 +2178,8 @@ def voice_loop(jarvis: Jarvis, voice_input: VoiceInput, lang_mgr=None) -> bool:
 
             if not active:
                 if not _standby_shown:
-                    _ui_standby = lang_mgr.ui_msg("standby") if lang_mgr else "😴 Standby..."
+                    _lm_ui = jarvis._lang
+                    _ui_standby = _lm_ui.ui_msg("standby") if _lm_ui else "😴 In standby — dì 'Jarvis'..."
                     print(_ui_standby, flush=True)
                     _standby_shown = True
             else:
@@ -2060,56 +2197,66 @@ def voice_loop(jarvis: Jarvis, voice_input: VoiceInput, lang_mgr=None) -> bool:
             print(f"\n🎙️  Trascritto: «{text_clean}»")
 
             lower = text_clean.lower()
-            if any(w in lower for w in ('esci', 'exit', 'quit', 'addio', 'arrivederci',
-                                           'au revoir', 'goodbye', 'tschüss', 'adiós',
-                                           'adeus', 'до свидания', '再见', 'さようなら',
-                                           'tot ziens', 'do widzenia', 'hoşça kal', 'hej då')):
-                bye_msg = lang_mgr.ui_msg("goodbye") if lang_mgr else "👋 Bye!"
-                print(f"\n{bye_msg}")
+            _lm_exit = jarvis._lang
+
+            # Uscita — stesse parole in tutte le lingue
+            _exit_words = {'esci', 'exit', 'quit', 'addio', 'arrivederci',
+                           'au revoir', 'goodbye', 'tschüss', 'adiós', 'adeus',
+                           'до свидания', '再见', 'tot ziens', 'do widzenia',
+                           'hoşça kal', 'hej då', '/esci', '/exit', '/quit'}
+            if any(w in lower for w in _exit_words):
+                bye = _lm_exit.ui_msg("goodbye") if _lm_exit else "👋 Bye!"
+                print(f"\n{bye}")
                 voice_input.stop()
                 return False
 
-            if any(w in lower for w in ('tastiera', 'keyboard', 'testo', 'scrivi',
-                                        'modalità', 'modalita', 'clavier', 'texte',
-                                        'tastatur', 'teclado', 'teclado')):
-                print("⌨️  Keyboard mode")
+            # Cambio modalità — stesse parole in tutte le lingue
+            _mode_words = {'tastiera', 'keyboard', 'clavier', 'tastatur',
+                           'teclado', '/mode', '/modalità', '/tastiera', '/keyboard',
+                           '/clavier', '/tastatur'}
+            if any(w in lower for w in _mode_words):
                 return True
 
             # Wake/sleep word dalla lingua corrente
-            has_wake  = lang_mgr.is_wake(text_clean) if lang_mgr else _contains_wake_word(text_clean)
-            has_sleep = lang_mgr.is_sleep(text_clean) if lang_mgr else False
+            _lm = jarvis._lang  # sempre disponibile, impostato in main()
+            has_wake  = _lm.is_wake(text_clean)  if _lm else _contains_wake_word(text_clean)
+            has_sleep = _lm.is_sleep(text_clean) if _lm else False
+
+            # Fallback fuzzy sleep: se sessione attiva e testo contiene wake + parola sleep
+            if not has_sleep and has_wake:
+                _SLEEP_KWORDS = {'dormi', 'riposa', 'sleep', 'dors', 'repos',
+                                 'schlaf', 'schlafe', 'slaap', 'duerme', 'dorme'}
+                lower_clean = text_clean.lower()
+                if any(w in lower_clean for w in _SLEEP_KWORDS):
+                    has_sleep = True
 
             if not active:
                 if has_wake:
                     session.activate()
-                    msg = lang_mgr.strip_wake(text_clean) if lang_mgr else _strip_wake_word(text_clean)
-                    session_msg = lang_mgr.ui_msg("session_open", min=WAKE_SESSION_TIMEOUT//60) if lang_mgr else f"✅ Wake word! {WAKE_SESSION_TIMEOUT//60} min"
-                    print(session_msg)
+                    msg = _lm.strip_wake(text_clean) if _lm else _strip_wake_word(text_clean)
+                    print(f"✅ Wake word! Sessione aperta per {WAKE_SESSION_TIMEOUT//60} min")
                     if msg:
                         print(f"⌨️  Tu: {msg}\n")
                         jarvis.process(msg)
                         session.touch()
                         print()
             else:
-                # Sleep word — chiude sessione
-                if has_sleep and has_wake:
-                    sleep_msg = lang_mgr.ui_msg("sleeping") if lang_mgr else "💤 Standby..."
-                    print(sleep_msg)
+                # Sleep word — chiude sessione (es. "jarvis dormi", "dormi jarvis", "sleep jarvis")
+                if has_sleep:
+                    ui_sleep = _lm.ui_msg("sleeping") if _lm else "💤 Vado in standby."
+                    print(f"\n{ui_sleep}")
+                    jarvis._tts_say(ui_sleep)
                     session.deactivate()
+                    _standby_shown = False
                     continue
 
-                # Comandi slash — gestiti dal language module
-                if text_clean.startswith("/") and hasattr(jarvis, '_lang'):
-                    result = jarvis._lang.handle_slash(text_clean)
-                    if result:
-                        print(result)
-                        if hasattr(jarvis, 'tts_lang'):
-                            jarvis.tts_lang = jarvis._lang.tts_lang
-                        session.touch()
-                        continue
-
+                # Tutto passa per process() — stesso comportamento di tastiera
                 print(f"⌨️  Tu: {text_clean}\n")
                 result = jarvis.process(text_clean)
+                if result == "__EXIT__":
+                    print("\n👋 Ciao!")
+                    voice_input.stop()
+                    return False
                 if result == "__SWITCH_MODE__":
                     return True
                 session.touch()
@@ -2142,31 +2289,103 @@ def _strip_wake_word(text):
 
 
 _YES_WORDS = {
-    'si', 'sì', 'sí', 'yes', 'ok', 'okay', 'certo', 'vai', 'procedi',
-    'conferma', 'confermo', 'esatto', 'giusto', 'affermativo', 'sure',
-    'dai', 'forza', 'avanti', 'fallo', 'esegui',
+    # Italiano
+    'si', 'sì', 'sí', 'certo', 'vai', 'procedi', 'conferma', 'confermo',
+    'esatto', 'giusto', 'affermativo', 'dai', 'forza', 'avanti', 'fallo', 'esegui',
+    # Inglese
+    'yes', 'ok', 'okay', 'sure', 'confirm', 'confirmed', 'go', 'do it', 'proceed',
+    # Francese
+    'oui', 'ouais', 'bien sûr', 'confirme', 'vas-y', 'allez',
+    # Tedesco
+    'ja', 'jawohl', 'bestätigt', 'klar', 'gut',
+    # Spagnolo
+    'sí', 'claro', 'confirmo', 'adelante', 'dale',
+    # Portoghese
+    'sim', 'claro', 'confirmo', 'pode',
+    # Russo
+    'да', 'хорошо', 'подтверждаю',
+    # Olandese
+    'ja', 'oké', 'bevestig',
+    # Polacco
+    'tak', 'dobrze', 'potwierdzam',
+    # Turco
+    'evet', 'tamam', 'onaylıyorum',
+    # Svedese
+    'ja', 'okej', 'bekräftar',
+    # Lussemburghese
+    'jo', 'kloer', 'bestätegt',
 }
 _NO_WORDS = {
+    # Italiano
     'no', 'nope', 'annulla', 'annullato', 'stop', 'blocca', 'fermati',
-    'negativo', 'non', 'cancel', 'cancella', 'lascia perdere', 'basta',
-    'aspetta', 'non farlo', 'non eseguire',
+    'negativo', 'non', 'cancella', 'lascia perdere', 'basta', 'aspetta',
+    'non farlo', 'non eseguire',
+    # Inglese
+    'cancel', 'cancelled', 'abort', 'stop', 'dont', "don't", 'negative',
+    # Francese
+    'non', 'annule', 'arrête', 'pas', 'négatif',
+    # Tedesco
+    'nein', 'abbrechen', 'stopp', 'halt', 'negativ',
+    # Spagnolo
+    'no', 'cancela', 'para', 'detente', 'negativo',
+    # Portoghese
+    'não', 'cancela', 'para', 'negativo',
+    # Russo
+    'нет', 'отмена', 'стоп', 'отменить',
+    # Olandese
+    'nee', 'annuleer', 'stop', 'niet',
+    # Polacco
+    'nie', 'anuluj', 'stop',
+    # Turco
+    'hayır', 'iptal', 'dur',
+    # Svedese
+    'nej', 'avbryt', 'stoppa',
 }
 
-def _voice_confirm(prompt, vi):
+def _voice_confirm(prompt, vi, lang="it"):
+    _hints = {
+        "it": ("(sì / no)", "non ho capito, ripeti (sì / no)"),
+        "fr": ("(oui / non)", "je n'ai pas compris, répétez (oui / non)"),
+        "en": ("(yes / no)", "didn't understand, repeat (yes / no)"),
+        "de": ("(ja / nein)", "nicht verstanden, wiederholen (ja / nein)"),
+        "es": ("(sí / no)", "no entendí, repite (sí / no)"),
+        "pt": ("(sim / não)", "não entendi, repita (sim / não)"),
+        "ru": ("(да / нет)", "не понял, повторите (да / нет)"),
+        "nl": ("(ja / nee)", "niet begrepen, herhaal (ja / nee)"),
+        "pl": ("(tak / nie)", "nie zrozumiałem, powtórz (tak / nie)"),
+        "tr": ("(evet / hayır)", "anlamadım, tekrarlayın (evet / hayır)"),
+        "sv": ("(ja / nej)", "förstod inte, upprepa (ja / nej)"),
+    }
+    _cancelled_msgs = {
+        "it": "❌ Annullato", "fr": "❌ Annulé", "en": "❌ Cancelled",
+        "de": "❌ Abgebrochen", "es": "❌ Cancelado", "pt": "❌ Cancelado",
+        "ru": "❌ Отменено", "nl": "❌ Geannuleerd", "pl": "❌ Anulowano",
+        "tr": "❌ İptal", "sv": "❌ Avbrutet",
+    }
+    _confirmed_msgs = {
+        "it": "✅ Confermato", "fr": "✅ Confirmé", "en": "✅ Confirmed",
+        "de": "✅ Bestätigt", "es": "✅ Confirmado", "pt": "✅ Confirmado",
+        "ru": "✅ Подтверждено", "nl": "✅ Bevestigd", "pl": "✅ Potwierdzone",
+        "tr": "✅ Onaylandı", "sv": "✅ Bekräftat",
+    }
+    hint1, hint2 = _hints.get(lang, _hints["en"])
+    cancelled = _cancelled_msgs.get(lang, "❌ Cancelled")
+    confirmed = _confirmed_msgs.get(lang, "✅ Confirmed")
+
     for attempt in range(2):
-        hint = " (sì / no)" if attempt == 0 else " — non ho capito, ripeti (sì / no)"
+        hint = f" ({hint1})" if attempt == 0 else f" — {hint2}"
         print(f"\n⚠️  {prompt + hint}", flush=True)
         text = vi.listen(timeout=float(CONFIRM_SILENCE_TIMEOUT), silence_sec=1.2)
         if text is None:
-            print("🔇 Silenzio → ❌ Annullato")
+            print(f"🔇 {cancelled}")
             return False
         lower = re.sub(r"[^\w\s]", "", text.lower()).strip()
-        print(f"   Risposta: «{text}»")
+        print(f"   «{text}»")
         if any(w in lower for w in _NO_WORDS):
-            print("❌ Annullato"); return False
+            print(cancelled); return False
         if any(w in lower for w in _YES_WORDS):
-            print("✅ Confermato"); return True
-    print("⚠️  Risposta non chiara → ❌ Annullato")
+            print(confirmed); return True
+    print(f"⚠️  {cancelled}")
     return False
 
 
@@ -2233,19 +2452,8 @@ def main():
 
     enable_search = SEARCH_OK
     searxng_url   = "http://localhost:8080"
-    brave_key     = ""
-    gnews_key     = ""
-
-    if SEARCH_OK:
-        print()
-        print("🔍 Configurazione ricerche:")
-        print("  SearXNG (raccomandato): docker run -d -p 8080:8080 searxng/searxng")
-        brave = input("  Brave Search API key (invio=salta): ").strip()
-        if brave:
-            brave_key = brave
-        gnews = input("  GNews API key (invio=salta, usa ANSA): ").strip()
-        if gnews:
-            gnews_key = gnews
+    brave_key     = os.environ.get("BRAVE_API_KEY", "")
+    gnews_key     = os.environ.get("GNEWS_API_KEY", "")
 
     bot = Jarvis(
         model=model,
@@ -2262,27 +2470,32 @@ def main():
     )
 
     bot._lang = lang_mgr  # collega language manager
+
+    # Crea agente autonomo se disponibile
+    if AGENT_OK:
+        bot._agent = JarvisAgent(
+            call_model    = lambda msg, history=None: bot._call_model(msg, history=history or []),
+            execute_cmd   = lambda cmd, expl: bot._execute(cmd, expl),
+            execute_search= lambda q, expl: bot._execute_search(q, expl) if bot.search else None,
+            lang          = lang_mgr,
+        )
+        print("🤖 Agente: ✅ attivo")
+    else:
+        print("🤖 Agente: ❌ agent_module.py non trovato")
     if bot.disc_on and bot._disc_bot:
         bot.start_discord()
         time.sleep(2)
 
     sep = "=" * 52
     print(f"\n{sep}")
-    ready_msg = lang_mgr.ui_msg("ready") if lang_mgr else "✅ JARVIS READY"
-    print(ready_msg)
+    print("✅ JARVIS v6.0 PRONTO")
     print(sep)
-    # Mostra comandi nella lingua corrente
-    if lang_mgr:
-        cmds = lang_mgr.data.get("commands", {})
-        remember_cmd = cmds.get("/memorizza", cmds.get("/remember", "/remember"))
-        memory_cmd   = cmds.get("/memoria",   cmds.get("/memory",   "/memory"))
-        forget_cmd   = cmds.get("/dimentica",  cmds.get("/forget",   "/forget all"))
-        print(f"{remember_cmd} [fatto]  | {memory_cmd} | {forget_cmd}")
-    else:
-        print("💾 /remember [fact]  | 📝 /memory | 🗑️ /forget all")
-    print("📊 /stats | 🔊 /tts | 🔄 /mode | 👋 /exit")
+    print("💾 /memorizza <fatto>  | 📝 /memoria | 🗑️ /dimentica")
+    print("📊 /stats | 🔊 /tts | 🔄 /modalita | 👋 /esci")
+    print("🔍 /cerca <q> | 🌤️ /meteo <città> | 📰 /notizie | 📖 /wiki <q>")
+    print("🌍 /lingua | /cambia lingua | /aggiungi lingua")
     print("─" * 52)
-    print("💡 Digita 'esci' per chiudere JARVIS e Ollama")
+    print("💡 Tutti i comandi iniziano con /")
     print(f"{sep}\n")
 
     # ── Loop principale ───────────────────────────────────────────────────────
@@ -2299,7 +2512,7 @@ def main():
                     voice_input._tts_ref = _TTSRef(bot)
                 _active_voice_input = voice_input
                 _voice_mode_active  = True
-                want_keyboard = voice_loop(bot, voice_input, lang_mgr=lang_mgr)
+                want_keyboard = voice_loop(bot, voice_input)
                 _voice_mode_active  = False
                 _active_voice_input = None
                 if not want_keyboard:
@@ -2327,13 +2540,16 @@ def main():
             if not user_input:
                 continue
 
-            if user_input.lower() in ('esci', 'exit', 'quit', 'bye'):
+            if user_input.lower() in ('esci', 'exit', 'quit', 'bye', '/esci', '/exit', '/quit'):
                 print("\n👋 Ciao!")
                 break
 
             print()
             result = bot.process(user_input)
-            if result == "__SWITCH_MODE__":
+            if result == "__EXIT__":
+                print("\n👋 Ciao!")
+                break
+            elif result == "__SWITCH_MODE__":
                 if SD_OK and WHISPER_OK:
                     if voice_input is None:
                         mic = choose_microphone()
