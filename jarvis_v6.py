@@ -32,6 +32,12 @@ from pathlib import Path
 import requests
 
 try:
+    from jarvis_banner import print_banner as _print_jarvis_banner
+    BANNER_OK = True
+except ImportError:
+    BANNER_OK = False
+
+try:
     from search_module import SearchModule
     SEARCH_OK = True
 except ImportError:
@@ -1721,13 +1727,9 @@ class Jarvis:
         lower = user_msg.lower().strip()
 
         # Comandi slash
-        if user_msg.strip().startswith('/') and self._lang:
-            result = self._lang.handle_slash(user_msg.strip())
-            if result:
-                self.tts_lang = self._lang.tts_lang  # aggiorna lingua TTS
-                return result
-
         # ── Tutti i comandi passano dal / ──────────────────────────────────────
+        # IMPORTANTE: i comandi universali vanno controllati PRIMA del language
+        # module — altrimenti handle_slash() li può intercettare e inghiottire.
         if lower.startswith('/'):
             cmd_part = lower.split()[0]
             rest     = user_msg.strip()[len(cmd_part):].strip()
@@ -1809,6 +1811,25 @@ class Jarvis:
                 # NOTA: /cerca RIMOSSO — le ricerche web le fa il modello con Tavily
                 # Il modello usa web_search tool automaticamente quando serve
 
+            # Language module come ultimo fallback per comandi slash non riconosciuti
+            # (gestisce /lingua, /lingue, /cambia lingua, /aiuto, ecc.)
+            if self._lang:
+                result = self._lang.handle_slash(user_msg.strip())
+                if result == "__STATS__":
+                    s = self._stats
+                    return (
+                        f"📊 Chiamate: {s['calls']} | Comandi: {s['cmds']} | "
+                        f"Negati: {s['denied']}\n"
+                        f"📂 Dir: {self.cwd} | 🤖 {self.model} | 💾 {len(self.permanent)} | "
+                        f"🧵 {_CPU_THREADS} thread CPU"
+                    )
+                if result == "__TTS__":
+                    self.tts_on = not self.tts_on
+                    return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
+                if result:
+                    self.tts_lang = self._lang.tts_lang
+                    return result
+
         # Attiva agente per richieste complesse
         if AGENT_OK and self._agent and should_use_agent(user_msg):
             print("\n🤖 Rilevata richiesta complessa — attivo agente", flush=True)
@@ -1862,6 +1883,29 @@ class Jarvis:
             for s in self._parse_inline_searches(full_text):
                 res = self._execute_search(s['query'], s['explanation'])
                 search_results.append({"query": s['query'], "output": res["output"]})
+
+            # ── Fallback anti-invenzione ──────────────────────────────────────
+            # Se il modello non ha cercato nulla ma la risposta contiene URL
+            # falsi o placeholder, forza una ricerca reale con Tavily.
+            _FAKE_URL = re.compile(
+                r'https?://(?:example\.(?:com|org|net)|placeholder\.|link\s*\d+)',
+                re.IGNORECASE
+            )
+            _NEEDS_SEARCH = re.compile(
+                r'\b(romsfun|vimm|archive\.org|myrient|cdromance|emulatorgames'
+                r'|github\.com|pypi\.org|huggingface\.co)\b',
+                re.IGNORECASE
+            )
+            has_fake_urls  = bool(_FAKE_URL.search(full_text))
+            site_in_query  = bool(_NEEDS_SEARCH.search(user_msg))
+
+            if self.search and (has_fake_urls or site_in_query) and not search_results:
+                # Costruisci una query pulita dal messaggio utente
+                fallback_q = user_msg.strip()
+                print(f"  ⚠️  Risposta con link finti rilevata — cerco davvero: {fallback_q[:60]}", flush=True)
+                res = self._execute_search(fallback_q, "fallback automatico — modello aveva inventato risultati")
+                search_results.append({"query": fallback_q, "output": res["output"]})
+            # ─────────────────────────────────────────────────────────────────
 
         # Se il modello ha fatto ricerche, mandagli i risultati e chiedi di rispondere
         if search_results and not self._pending:
@@ -2133,25 +2177,39 @@ class Jarvis:
         threading.Thread(target=_run, daemon=True, name="discord").start()
 
     def _print_banner(self):
-        sep = "=" * 52
-        print(f"\n{sep}")
-        print("🧠 JARVIS v6.0 — Core Stabile")
-        print(sep)
-        print(f"🤖 Modello:    {self.model}")
-        print(f"🧵 CPU thread: {_CPU_THREADS}")
-        print(f"📂 Dir:        {self.cwd}")
-        print(f"🔐 Sudo:       {'✅' if self.sudo_pass else '❌'}")
-        tts = f"✅ ({self._tts_player})" if self.tts_on and self._tts_player else "❌"
-        print(f"🔊 TTS:        {tts}")
-        print(f"💙 Discord:    {'✅' if self.disc_on else '❌'}")
-        print(f"💾 Memorie:    {len(self.permanent)}")
-        if hasattr(self, 'search') and self.search:
-            print(f"🔍 Ricerche:   ✅ attive")
-        elif SEARCH_OK:
-            print(f"🔍 Ricerche:   ⚠️  modulo trovato ma non inizializzato")
+        if BANNER_OK:
+            # Determina engine di ricerca attivi
+            engines = []
+            if hasattr(self, 'search') and self.search:
+                s = self.search
+                if hasattr(s, '_tavily') and s._tavily.available:
+                    engines.append("Tavily")
+                if hasattr(s, '_ddg'):
+                    engines.append("DDG")
+            eng_str = " + ".join(engines) if engines else ""
+
+            _print_jarvis_banner(
+                model        = self.model,
+                tts_on       = self.tts_on,
+                discord_on   = self.disc_on,
+                memory_count = len(self.permanent),
+                search_ok    = bool(hasattr(self, 'search') and self.search),
+                ollama_ok    = True,
+                speaker_ok   = False,  # aggiornato dopo VoiceModule init
+                lang         = self.tts_lang,
+                search_engines = eng_str,
+            )
         else:
-            print(f"🔍 Ricerche:   ❌ search_module.py non trovato")
-        print(sep)
+            # Fallback testo semplice se jarvis_banner.py non trovato
+            sep = "=" * 52
+            print(f"\n{sep}")
+            print("🧠 JARVIS v6.0 — Core Stabile")
+            print(sep)
+            print(f"🤖 Modello:    {self.model}")
+            print(f"🔊 TTS:        {'✅' if self.tts_on else '❌'}")
+            print(f"💙 Discord:    {'✅' if self.disc_on else '❌'}")
+            print(f"💾 Memorie:    {len(self.permanent)}")
+            print(sep)
 
 
 # ─── Loop vocale ──────────────────────────────────────────────────────────────
@@ -2563,6 +2621,9 @@ def main():
                 else:
                     print("⚠️ Dipendenze vocali non disponibili")
             else:
+                if result:
+                    print(result)
+                    bot._tts_say(result)
                 print()
 
         except KeyboardInterrupt:
