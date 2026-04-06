@@ -48,29 +48,36 @@ try:
 except ImportError:
     RESEMBLYZER_OK = False
 
-# ── Costanti ──────────────────────────────────────────────────────────────────
-SAMPLE_RATE       = 16000  # Hz — Whisper lavora a 16kHz, non cambiare
-SPEAKER_PROFILE   = Path.home() / "jarvis_memory" / "speaker_profile.npy"  # profilo vocale salvato
-SPEAKER_THRESHOLD = 0.70   # soglia similarità voce (0.0–1.0): più alto = più selettivo
-SESSION_TIMEOUT   = 120    # secondi di inattività prima che JARVIS torni in standby
+try:
+    import noisereduce as nr; NOISEREDUCE_OK = True
+except ImportError:
+    NOISEREDUCE_OK = _ensure_pkg("noisereduce", "noisereduce")
+    if NOISEREDUCE_OK:
+        import noisereduce as nr
 
-# Varianti del wake word "Jarvis" come Whisper potrebbe trascriverle
-# (errori di pronuncia, accenti diversi, lingue diverse)
+try:
+    import torch
+    from speechbrain.inference.separation import SepformerSeparation
+    SEPFORMER_OK = True
+except Exception:
+    SEPFORMER_OK = False
+
+# ── Costanti ──────────────────────────────────────────────────────────────────
+SAMPLE_RATE       = 16000
+SPEAKER_PROFILE   = Path.home() / "jarvis_memory" / "speaker_profile.npy"
+SPEAKER_THRESHOLD = 0.70
+SESSION_TIMEOUT   = 120
+
 _WAKE_VARIANTS = {
     "jarvis","jarvi","jarvs","jarbi","jarwis","javis","jarves","jarfis",
     "zarvis","garvis","harvis","giorvis","giorvi","giervi","giorviz",
     "jervis","jervi","yervis","gervis","gervi","djarvis","djarvi",
 }
-# Regex fuzzy per catturare varianti non presenti nel set sopra
 _RE_WAKE  = re.compile(r'\b(?:jar|gar|ger|gio|gie|jer|yer|djar)[a-z]{1,5}\b', re.IGNORECASE)
-# Parole che mettono JARVIS in modalità sleep (standby)
 _RE_SLEEP = re.compile(r'\b(dormi|sleep|dors|schlaf)\b', re.IGNORECASE)
-# Pattern per filtrare i microfoni reali dagli output audio (monitor, HDMI, ecc.)
 _RE_MIC   = re.compile(r'mic|microphone|input|capture|headset|cuffie|analog|built.?in|internal|integrated|digital|acp|usb.?audio', re.IGNORECASE)
 
 def _lev(a,b):
-    """Distanza di Levenshtein: misura quanti caratteri differiscono tra due stringhe.
-    Usata per il riconoscimento fuzzy del wake word (es. 'garvis' → distanza 1 da 'jarvis')."""
     if a==b: return 0
     if not a: return len(b)
     if not b: return len(a)
@@ -84,20 +91,17 @@ def _lev(a,b):
     return m[len(a)][len(b)]
 
 def is_wake_word(text):
-    """Controlla se il testo trascritto contiene il wake word 'Jarvis' in qualsiasi variante.
-    Usa sia un set di varianti note sia fuzzy matching per coprire accenti e storpiature."""
     clean=text.lower().strip()
     for t in re.findall(r'[a-zàèìòùéç]+',clean):
         if t in _WAKE_VARIANTS: return True
-        if len(t)>=4 and _lev(t,"jarvis")<=2: return True  # max 2 errori
+        if len(t)>=4 and _lev(t,"jarvis")<=2: return True
     for m in _RE_WAKE.finditer(clean):
-        if _lev(m.group().lower(),"jarvis")<=3: return True  # regex + fuzzy
+        if _lev(m.group().lower(),"jarvis")<=3: return True
     return False
 
 def is_sleep_word(text): return bool(_RE_SLEEP.search(text.lower()))
 
 def strip_wake_word(text):
-    """Rimuove il wake word dal testo trascritto prima di passarlo al modello."""
     return re.sub(r'^[,\s!]+','',_RE_WAKE.sub("",text).strip()).strip()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -240,11 +244,19 @@ class TTSEngine:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SpeakerVerifier:
+    # Soglia similarity per un singolo segmento
+    SEGMENT_THRESHOLD = 0.72
+    # Lunghezza segmento in secondi per il voto a maggioranza
+    SEGMENT_SEC = 1.5
+    # Quanti segmenti devono passare (es. 0.5 = almeno la metà)
+    MAJORITY_RATIO = 0.5
+    # Minimo segmenti validi per accettare (evita clip cortissimi)
+    MIN_SEGMENTS = 1
+
     def __init__(self, profile_path=SPEAKER_PROFILE, threshold=SPEAKER_THRESHOLD):
         self._path=Path(profile_path); self._threshold=threshold
         self._profile=None; self._encoder=None
         if RESEMBLYZER_OK:
-            import torch
             self._encoder=VoiceEncoder(device='cpu'); self._load()
 
     def _load(self):
@@ -256,24 +268,299 @@ class SpeakerVerifier:
     @property
     def has_profile(self): return self._profile is not None
 
+    def _denoise(self, audio: np.ndarray) -> np.ndarray:
+        """Rimuove rumore stazionario (ventola, AC, traffico lontano)."""
+        if not NOISEREDUCE_OK:
+            return audio
+        try:
+            # prop_decrease=0.8 — aggressivo ma senza artefatti eccessivi
+            return nr.reduce_noise(y=audio, sr=SAMPLE_RATE,
+                                   prop_decrease=0.8, stationary=True).astype(np.float32)
+        except Exception:
+            return audio
+
+    def _cosine(self, a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+    def _segment_embeddings(self, wav: np.ndarray) -> list:
+        """Divide l'audio in segmenti e calcola l'embedding di ognuno."""
+        seg_len = int(SAMPLE_RATE * self.SEGMENT_SEC)
+        segments = []
+        for start in range(0, len(wav), seg_len):
+            chunk = wav[start:start + seg_len]
+            # Scarta chunk troppo corti o silenziosi
+            if len(chunk) < int(SAMPLE_RATE * 0.5):
+                continue
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if rms < 0.002:
+                continue
+            try:
+                emb = self._encoder.embed_utterance(chunk)
+                segments.append(emb)
+            except Exception:
+                continue
+        return segments
+
     def create_profile(self, audio):
         if not self._encoder: return False
         try:
-            wav=preprocess_wav(audio,source_sr=SAMPLE_RATE)
-            self._profile=self._encoder.embed_utterance(wav)
-            self._path.parent.mkdir(parents=True,exist_ok=True)
-            np.save(str(self._path),self._profile)
+            denoised = self._denoise(audio)
+            wav = preprocess_wav(denoised, source_sr=SAMPLE_RATE)
+            # Usa embed_utterance sull'audio intero per il profilo (più stabile)
+            self._profile = self._encoder.embed_utterance(wav)
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(str(self._path), self._profile)
             print("✅ Profilo vocale salvato!"); return True
         except Exception as e: print(f"❌ Profilo: {e}"); return False
 
-    def verify(self, audio):
-        if not self._encoder or self._profile is None: return True, 1.0
+    def verify(self, audio: np.ndarray) -> tuple:
+        """
+        Verifica con denoising + filtraggio segmenti.
+        Ritorna (True/False, score_medio).
+        Usare filter_audio() per ottenere l'audio ripulito da mandare a Whisper.
+        """
+        cleaned, avg_score, passed, total = self._filter_segments(audio)
+        ok = cleaned is not None
+        return ok, avg_score
+
+    def filter_audio(self, audio: np.ndarray) -> tuple:
+        """
+        Ritorna (audio_filtrato, score_medio) — l'audio contiene SOLO
+        i segmenti in cui parla il proprietario. I segmenti altrui vengono
+        sostituiti con silenzio, così Whisper non li trascrive.
+        Se nessun segmento passa, ritorna (None, score).
+        """
+        cleaned, avg_score, passed, total = self._filter_segments(audio)
+        print(f"  🎙️  Speaker: {passed}/{total} segmenti ok, score medio={avg_score:.2f}", flush=True)
+        return cleaned, avg_score
+
+    def _filter_segments(self, audio: np.ndarray) -> tuple:
+        """
+        Logica centrale: denoising → segmentazione → filtraggio.
+        Ritorna (audio_pulito_o_None, avg_score, n_passati, n_totali).
+        """
+        if not self._encoder or self._profile is None:
+            return audio, 1.0, 1, 1
         try:
-            wav=preprocess_wav(audio,source_sr=SAMPLE_RATE)
-            emb=self._encoder.embed_utterance(wav)
-            sim=float(np.dot(self._profile,emb)/(np.linalg.norm(self._profile)*np.linalg.norm(emb)+1e-9))
-            return sim>=self._threshold, sim
-        except: return True, 1.0
+            # Step 1 — denoising
+            denoised = self._denoise(audio)
+
+            # Step 2 — preprocessing resemblyzer
+            wav = preprocess_wav(denoised, source_sr=SAMPLE_RATE)
+
+            seg_len = int(SAMPLE_RATE * self.SEGMENT_SEC)
+
+            # Step 3 — segmentazione con indici originali
+            segments = []  # lista di (start, end, chunk, rms)
+            for start in range(0, len(wav), seg_len):
+                chunk = wav[start:start + seg_len]
+                if len(chunk) < int(SAMPLE_RATE * 0.3):
+                    continue
+                rms = float(np.sqrt(np.mean(chunk ** 2)))
+                segments.append((start, start + len(chunk), chunk, rms))
+
+            if not segments:
+                return None, 0.0, 0, 0
+
+            # Step 4 — embedding e score per ogni segmento
+            scores = []
+            for (start, end, chunk, rms) in segments:
+                if rms < 0.002:
+                    # Silenzio — non è una voce altrui, tienilo
+                    scores.append((start, end, 1.0, True))
+                    continue
+                try:
+                    emb = self._encoder.embed_utterance(chunk)
+                    sim = self._cosine(self._profile, emb)
+                    passed = sim >= self.SEGMENT_THRESHOLD
+                    scores.append((start, end, sim, passed))
+                except Exception:
+                    scores.append((start, end, 0.0, False))
+
+            # Step 5 — ricostruisci audio sostituendo segmenti altrui con silenzio
+            filtered = denoised.copy()
+            n_passed = sum(1 for _, _, _, ok in scores if ok)
+            n_total  = len(scores)
+            sims     = [s for _, _, s, _ in scores]
+            avg      = float(np.mean(sims)) if sims else 0.0
+
+            for (start, end, sim, ok) in scores:
+                if not ok:
+                    # Azzera il segmento — Whisper VAD lo salterà
+                    end_real = min(end, len(filtered))
+                    filtered[start:end_real] = 0.0
+
+            if n_passed == 0:
+                return None, avg, 0, n_total
+
+            return filtered.astype(np.float32), avg, n_passed, n_total
+
+        except Exception:
+            return audio, 1.0, 1, 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TARGET SPEAKER EXTRACTOR — SepFormer + resemblyzer
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TargetSpeakerExtractor:
+    """
+    Estrae la voce del proprietario da audio misto usando SepFormer + resemblyzer.
+
+    Pipeline:
+      1. SepFormer separa l'audio in N tracce indipendenti (tipicamente 2)
+      2. resemblyzer calcola la similarity di ogni traccia col profilo
+      3. La traccia più simile al profilo viene amplificata
+      4. Le altre tracce vengono attenuate (non azzerate — evita artefatti)
+      5. Si ricostruisce un singolo segnale audio pulito
+
+    Se SepFormer non è disponibile, cade in graceful degradation:
+    usa solo denoising + resemblyzer segment filtering.
+    """
+
+    # Modello HuggingFace — scaricato automaticamente al primo uso (~200MB)
+    SEPFORMER_MODEL = "speechbrain/sepformer-wham"
+    # Boost applicato alla traccia del proprietario
+    OWNER_BOOST = 2.5
+    # Attenuazione applicata alle tracce altrui (non 0 — evita artefatti click)
+    OTHER_ATTENUATION = 0.05
+    # Soglia similarity per riconoscere la traccia del proprietario
+    OWNER_THRESHOLD = 0.65
+
+    def __init__(self, speaker_verifier: "SpeakerVerifier"):
+        self._verifier = speaker_verifier
+        self._model = None
+        self._model_lock = threading.Lock()
+        self._ready = False
+
+        if SEPFORMER_OK:
+            threading.Thread(
+                target=self._load_model, daemon=True, name="sepformer"
+            ).start()
+        else:
+            print("⚠️  SepFormer non disponibile — solo denoising attivo")
+
+    def _load_model(self):
+        try:
+            print("⏳ Carico SepFormer in background...", flush=True)
+            model = SepformerSeparation.from_hparams(
+                source=self.SEPFORMER_MODEL,
+                savedir=str(Path.home() / "jarvis_memory" / "sepformer"),
+                run_opts={"device": "cpu"}
+            )
+            with self._model_lock:
+                self._model = model
+                self._ready = True
+            print("✅ SepFormer pronto — estrazione voce attiva", flush=True)
+        except Exception as e:
+            print(f"⚠️  SepFormer non caricato: {e}", flush=True)
+
+    @property
+    def is_ready(self):
+        with self._model_lock:
+            return self._ready
+
+    def extract(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Estrae e amplifica la voce del proprietario.
+        Ritorna sempre un array numpy float32 a 16kHz.
+        Se non può separare, ritorna l'audio denoised originale.
+        """
+        # Denoising sempre, anche senza SepFormer
+        denoised = self._verifier._denoise(audio)
+
+        with self._model_lock:
+            model = self._model
+
+        if model is None or not self._verifier.has_profile:
+            # SepFormer non pronto o nessun profilo — ritorna solo denoised
+            return denoised
+
+        try:
+            return self._separate_and_boost(denoised, model)
+        except Exception as e:
+            print(f"  ⚠️  SepFormer errore: {e} — uso audio denoised", flush=True)
+            return denoised
+
+    def _separate_and_boost(self, audio: np.ndarray, model) -> np.ndarray:
+        """Logica principale di separazione e boost."""
+        # SepFormer vuole tensore float32 shape [1, samples] a 8kHz o 16kHz
+        # Il modello sepformer-wham lavora a 8kHz internamente
+        import torchaudio
+
+        # Converti a tensore
+        wav_tensor = torch.from_numpy(audio).unsqueeze(0)  # [1, samples]
+
+        # Resample a 8kHz per SepFormer (sepformer-wham è addestrato a 8kHz)
+        wav_8k = torchaudio.functional.resample(wav_tensor, SAMPLE_RATE, 8000)
+
+        # Separazione — ritorna [samples, n_sources]
+        with torch.no_grad():
+            est_sources = model.separate_batch(wav_8k)  # [1, samples, n_sources]
+
+        n_sources = est_sources.shape[-1]
+
+        # Risampla ogni sorgente a 16kHz e calcola similarity col profilo
+        scores = []
+        sources_16k = []
+        for i in range(n_sources):
+            src = est_sources[0, :, i]  # [samples] a 8kHz
+            # Risampla a 16kHz
+            src_16k = torchaudio.functional.resample(
+                src.unsqueeze(0), 8000, SAMPLE_RATE
+            ).squeeze(0).numpy()
+
+            sources_16k.append(src_16k)
+
+            # Calcola similarity con il profilo del proprietario
+            try:
+                from resemblyzer import preprocess_wav as prep
+                wav_proc = prep(src_16k, source_sr=SAMPLE_RATE)
+                if len(wav_proc) < int(SAMPLE_RATE * 0.3):
+                    scores.append(0.0)
+                    continue
+                emb = self._verifier._encoder.embed_utterance(wav_proc)
+                sim = self._verifier._cosine(self._verifier._profile, emb)
+                scores.append(sim)
+            except Exception:
+                scores.append(0.0)
+
+        print(
+            f"  🎙️  SepFormer: {n_sources} tracce, "
+            f"scores={[f'{s:.2f}' for s in scores]}",
+            flush=True
+        )
+
+        # Identifica la traccia del proprietario (score più alto)
+        best_idx = int(np.argmax(scores))
+        best_score = scores[best_idx]
+
+        if best_score < self.OWNER_THRESHOLD:
+            # Nessuna traccia sembra il proprietario — ritorna audio denoised
+            print(f"  🔒 Nessuna traccia riconosciuta (max={best_score:.2f})", flush=True)
+            return self._verifier._denoise(audio)
+
+        # Ricostruisci: boost sulla traccia del proprietario, attenuazione sulle altre
+        target_len = len(audio)
+        mixed = np.zeros(target_len, dtype=np.float32)
+
+        for i, src_16k in enumerate(sources_16k):
+            # Allinea lunghezza
+            src_aligned = np.zeros(target_len, dtype=np.float32)
+            copy_len = min(len(src_16k), target_len)
+            src_aligned[:copy_len] = src_16k[:copy_len]
+
+            if i == best_idx:
+                mixed += src_aligned * self.OWNER_BOOST
+            else:
+                mixed += src_aligned * self.OTHER_ATTENUATION
+
+        # Normalizza per evitare clipping
+        peak = np.max(np.abs(mixed))
+        if peak > 1.0:
+            mixed /= peak
+
+        return mixed.astype(np.float32)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VOICE INPUT — STT (uguale a jarvis_v6)
@@ -285,9 +572,10 @@ class VoiceInput:
     def __init__(self, mic):
         self.mic=mic; self._model=None; self._model_lock=threading.Lock()
         self._rms_thresh=0.003; self._stop_event=threading.Event()
-        self._tts_ref=None      # impostato da VoiceModule
-        self._speaker_ref=None  # impostato da VoiceModule
-        self._lang_ref=None     # impostato da VoiceModule — localizzazione wake/sleep
+        self._tts_ref=None        # impostato da VoiceModule
+        self._speaker_ref=None    # impostato da VoiceModule
+        self._extractor_ref=None  # impostato da VoiceModule — TargetSpeakerExtractor
+        self._lang_ref=None       # impostato da VoiceModule — localizzazione wake/sleep
         if not WHISPER_OK: print("❌ faster-whisper non disponibile"); return
         print(f"⏳ Carico Whisper '{self.WHISPER_MODEL_SIZE}' in background...")
         threading.Thread(target=self._load_whisper,daemon=True,name="whisper").start()
@@ -405,7 +693,12 @@ class VoiceInput:
         if model is None: return None
         try:
             if len(audio.shape)>1: audio=audio[:,0]
-            segs,_=model.transcribe(audio,language="it",beam_size=5,vad_filter=True,
+            # Usa la lingua dal language manager se disponibile, altrimenti None (auto-detect)
+            whisper_lang = None
+            if self._lang_ref and hasattr(self._lang_ref, 'current'):
+                # Whisper usa codici ISO 639-1 — compatibili con quelli di JARVIS
+                whisper_lang = self._lang_ref.current
+            segs,_=model.transcribe(audio,language=whisper_lang,beam_size=5,vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=400,speech_pad_ms=200,threshold=0.3))
             text=" ".join(s.text.strip() for s in segs).strip()
             print("\r"+" "*55+"\r",end="")
@@ -442,12 +735,25 @@ class VoiceInput:
         if audio is None or len(audio) < SAMPLE_RATE * 0.3:
             return None
 
-        # Speaker verification — ignora voci che non sono il proprietario
+        # Estrazione voce del proprietario:
+        # Se SepFormer è pronto → separa le voci, boost sulla tua, attenuazione sulle altre
+        # Altrimenti → fallback su segment filtering con resemblyzer
         if self._speaker_ref and self._speaker_ref.has_profile:
-            ok, score = self._speaker_ref.verify(audio)
-            if not ok:
-                print(f"  🔒 Voce ignorata ({score:.2f})", flush=True)
-                return None
+            if self._extractor_ref and self._extractor_ref.is_ready:
+                # Pipeline completo: SepFormer + resemblyzer
+                audio = self._extractor_ref.extract(audio)
+                # Verifica finale — se l'estrazione ha prodotto silenzio o voce aliena
+                ok, score = self._speaker_ref.verify(audio)
+                if not ok:
+                    print(f"  🔒 Voce non riconosciuta dopo estrazione (score={score:.2f})", flush=True)
+                    return None
+            else:
+                # Fallback: segment filtering puro con resemblyzer
+                audio_filtered, score = self._speaker_ref.filter_audio(audio)
+                if audio_filtered is None:
+                    print(f"  🔒 Nessun segmento tuo rilevato (score={score:.2f})", flush=True)
+                    return None
+                audio = audio_filtered
 
         return self._transcribe(audio, model)
 
@@ -465,11 +771,13 @@ class VoiceModule:
         self._session_t=0.0; self._stop=threading.Event()
         self._voice=VoiceInput(mic)
         self._speaker=SpeakerVerifier()
+        self._extractor=TargetSpeakerExtractor(self._speaker)
         pa_name=mic.get('pa_name')
         self._tts=TTSEngine(lang=lang,mem_dir=mem_dir,pa_name=pa_name)
-        # Collega riferimenti per speaker verify e TTS wait in VoiceInput.listen()
+        # Collega riferimenti per speaker verify, extractor e TTS wait in VoiceInput.listen()
         self._voice._tts_ref=self._tts
         self._voice._speaker_ref=self._speaker
+        self._voice._extractor_ref=self._extractor
 
     def say(self, text): self._tts.say(text)
     def stop_speaking(self): self._tts.stop()
