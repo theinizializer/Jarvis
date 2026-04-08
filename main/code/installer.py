@@ -1,70 +1,54 @@
 #!/usr/bin/env python3
 """
-JARVIS v6.0 — Installer
-Crea l'ambiente virtuale jarvisenv, installa tutte le dipendenze,
-configura le API key, crea avvia_jarvis.sh e verifica il setup.
+JARVIS v6.0 — Installer cross-platform
+Supporta: Linux (Ubuntu/Debian), macOS, Windows
+
+Logica:
+  - Rileva OS e configura di conseguenza
+  - Installa Ollama automaticamente se mancante
+  - Linux:   apt + venv jarvisenv in ~
+  - macOS:   Homebrew + nessun venv (Python sistema)
+  - Windows: winget + nessun venv (Python sistema)
+  - Sposta i file in ~/Documenti/modelli (o equivalente per OS)
+  - Applica patch OS-specific al codice (player audio, mute mic)
+  - Configura .env con API key
+  - Crea script di avvio appropriato per OS
 """
 
-import os
-import sys
-import json
-import shutil
-import subprocess
-import platform
+import os, sys, json, shutil, subprocess, platform, tempfile, urllib.request
 from pathlib import Path
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIGURAZIONE
+# RILEVAMENTO OS
 # ══════════════════════════════════════════════════════════════════════════════
 
-VENV_NAME    = "jarvisenv"
-ENV_FILE     = ".env"
-START_SCRIPT = "avvia_jarvis.sh"
-PYTHON_MIN   = (3, 10)
+OS = platform.system()          # "Linux" | "Darwin" | "Windows"
+IS_LINUX   = OS == "Linux"
+IS_MAC     = OS == "Darwin"
+IS_WINDOWS = OS == "Windows"
 
-# Dipendenze pip divise per categoria
-PIP_CORE = [
-    "requests>=2.31.0",
-    "numpy>=1.24.0",
-    "scipy>=1.11.0",
-]
+PYTHON_MIN = (3, 10)
 
-PIP_STT = [
-    "faster-whisper>=1.0.0",
-]
+# ── Cartella destinazione ──────────────────────────────────────────────────────
+# Linux/Mac:  ~/Documenti/modelli  oppure  ~/Documents/modelli
+# Windows:    %USERPROFILE%\Documents\modelli
+def _find_documents() -> Path:
+    home = Path.home()
+    for name in ("Documenti", "Documents", "Documentos", "Dokumente"):
+        p = home / name
+        if p.exists():
+            return p
+    # Fallback: crea ~/Documents
+    p = home / "Documents"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
-PIP_AUDIO = [
-    "sounddevice>=0.4.6",
-    "soundfile>=0.12.1",
-]
-
-PIP_TTS = [
-    "gTTS>=2.5.0",
-]
-
-PIP_VOICE_OPTIONAL = [
-    "resemblyzer>=0.1.4",   # speaker verification
-    "webrtcvad>=2.0.10",    # VAD
-]
-
-PIP_SEARCH = [
-    "ddgs>=0.1.0",
-    "tavily-python>=0.3.0",
-]
-
-PIP_DISCORD = [
-    "discord.py>=2.3.0",
-]
-
-# Pacchetti sistema (apt)
-APT_REQUIRED = [
-    ("mpg123",           "mpg123",           "TTS audio player"),
-    ("parecord",         "pulseaudio-utils",  "microphone recording"),
-    ("docker",           "docker.io",         "SearXNG local search (optional)"),
-]
+DEST_DIR  = _find_documents() / "modelli"
+VENV_DIR  = Path.home() / "jarvisenv"   # solo Linux
+ENV_FILE  = DEST_DIR / ".env"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COLORI TERMINALE
+# COLORI
 # ══════════════════════════════════════════════════════════════════════════════
 
 class C:
@@ -72,25 +56,33 @@ class C:
     YELLOW = "\033[93m"
     RED    = "\033[91m"
     BLUE   = "\033[94m"
+    CYAN   = "\033[96m"
     BOLD   = "\033[1m"
     RESET  = "\033[0m"
 
-def ok(msg):   print(f"{C.GREEN}✅ {msg}{C.RESET}")
-def warn(msg): print(f"{C.YELLOW}⚠️  {msg}{C.RESET}")
-def err(msg):  print(f"{C.RED}❌ {msg}{C.RESET}")
-def info(msg): print(f"{C.BLUE}ℹ️  {msg}{C.RESET}")
-def bold(msg): print(f"{C.BOLD}{msg}{C.RESET}")
+def ok(m):   print(f"{C.GREEN}✅ {m}{C.RESET}")
+def warn(m): print(f"{C.YELLOW}⚠️  {m}{C.RESET}")
+def err(m):  print(f"{C.RED}❌ {m}{C.RESET}")
+def info(m): print(f"{C.BLUE}ℹ️  {m}{C.RESET}")
+def bold(m): print(f"{C.BOLD}{m}{C.RESET}")
 
 def step(n, total, msg):
     print(f"\n{C.BOLD}[{n}/{total}] {msg}{C.RESET}")
-    print("─" * 50)
+    print("─" * 54)
+
+def ask(prompt, default="") -> str:
+    val = input(f"   {prompt} ").strip()
+    return val if val else default
+
+def confirm(prompt) -> bool:
+    return ask(prompt + " (S/n):").lower() in ("", "s", "y", "si", "sì", "yes")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UTILITÀ
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run(cmd, check=True, capture=False, input_text=None):
-    kwargs = dict(check=check)
+def run(cmd, check=True, capture=False, input_text=None, shell=False):
+    kwargs = dict(check=check, shell=shell)
     if capture:
         kwargs["capture_output"] = True
         kwargs["text"] = True
@@ -99,206 +91,437 @@ def run(cmd, check=True, capture=False, input_text=None):
         kwargs["text"] = True
     return subprocess.run(cmd, **kwargs)
 
-def cmd_exists(name):
+def cmd_exists(name: str) -> bool:
     return shutil.which(name) is not None
 
-def python_in_venv():
-    venv = Path(VENV_NAME)
-    if platform.system() == "Windows":
-        return venv / "Scripts" / "python.exe"
-    return venv / "bin" / "python"
+def pip_cmd() -> list:
+    """Ritorna il comando pip corretto per l'OS."""
+    if IS_LINUX:
+        return [str(VENV_DIR / "bin" / "pip")]
+    if IS_MAC:
+        return [sys.executable, "-m", "pip"]
+    # Windows
+    return [sys.executable, "-m", "pip"]
 
-def pip_in_venv():
-    venv = Path(VENV_NAME)
-    if platform.system() == "Windows":
-        return venv / "Scripts" / "pip.exe"
-    return venv / "bin" / "pip"
+def python_cmd() -> list:
+    if IS_LINUX:
+        return [str(VENV_DIR / "bin" / "python")]
+    return [sys.executable]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 1 — Controllo sistema
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_system():
-    step(1, 7, "Controllo sistema")
+    step(1, 8, "Controllo sistema")
 
-    # Python version
     v = sys.version_info
     if (v.major, v.minor) < PYTHON_MIN:
         err(f"Python {PYTHON_MIN[0]}.{PYTHON_MIN[1]}+ richiesto, trovato {v.major}.{v.minor}")
         sys.exit(1)
     ok(f"Python {v.major}.{v.minor}.{v.micro}")
+    ok(f"Sistema: {OS} {platform.release()}")
+    ok(f"Destinazione: {DEST_DIR}")
 
-    # OS
-    os_name = platform.system()
-    ok(f"Sistema: {os_name} {platform.release()}")
-    if os_name == "Windows":
-        warn("Windows: alcune funzionalità vocali potrebbero non funzionare")
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — Installa Ollama (tutti gli OS)
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # Ollama
+def install_ollama():
+    step(2, 8, "Ollama")
+
     if cmd_exists("ollama"):
         try:
             r = run(["ollama", "--version"], capture=True, check=False)
-            ver = r.stdout.strip() if r.returncode == 0 else "?"
-            ok(f"Ollama: {ver}")
+            ok(f"Ollama già installato: {r.stdout.strip()}")
         except Exception:
-            ok("Ollama: installato")
-    else:
-        err("Ollama non trovato!")
-        print("   Installa da: https://ollama.com")
-        if input("   Continuare comunque? (s/N): ").strip().lower() != "s":
+            ok("Ollama già installato")
+        return
+
+    warn("Ollama non trovato — installo automaticamente...")
+
+    try:
+        if IS_LINUX:
+            # Script ufficiale Ollama
+            info("Scarico installer Ollama (curl)...")
+            run("curl -fsSL https://ollama.com/install.sh | sh", shell=True)
+
+        elif IS_MAC:
+            # Ollama su Mac si installa come .app — usa brew se disponibile
+            if cmd_exists("brew"):
+                run(["brew", "install", "ollama"])
+            else:
+                # Scarica il .dmg
+                dmg = Path(tempfile.mktemp(suffix=".dmg"))
+                info("Scarico Ollama.dmg...")
+                urllib.request.urlretrieve(
+                    "https://ollama.com/download/Ollama-darwin.dmg", str(dmg)
+                )
+                run(["hdiutil", "attach", str(dmg)])
+                run(["cp", "-r", "/Volumes/Ollama/Ollama.app", "/Applications/"])
+                run(["hdiutil", "detach", "/Volumes/Ollama"])
+                dmg.unlink(missing_ok=True)
+                # Aggiungi ollama al PATH
+                info("Aggiungo ollama al PATH...")
+                run(["ln", "-sf", "/Applications/Ollama.app/Contents/MacOS/ollama",
+                     "/usr/local/bin/ollama"], check=False)
+
+        elif IS_WINDOWS:
+            # winget
+            if cmd_exists("winget"):
+                run(["winget", "install", "-e", "--id", "Ollama.Ollama",
+                     "--accept-package-agreements", "--accept-source-agreements"])
+            else:
+                # Scarica installer .exe
+                exe = Path(tempfile.mktemp(suffix=".exe"))
+                info("Scarico OllamaSetup.exe...")
+                urllib.request.urlretrieve(
+                    "https://ollama.com/download/OllamaSetup.exe", str(exe)
+                )
+                run([str(exe), "/S"])  # silent install
+                exe.unlink(missing_ok=True)
+
+        if cmd_exists("ollama"):
+            ok("Ollama installato con successo")
+        else:
+            warn("Ollama installato ma potrebbe richiedere un nuovo terminale per essere nel PATH")
+
+    except Exception as e:
+        err(f"Installazione Ollama fallita: {e}")
+        err("Installa manualmente da: https://ollama.com")
+        if not confirm("Continuare comunque?"):
             sys.exit(1)
 
-    # Git
-    if cmd_exists("git"):
-        ok("Git: disponibile")
-    else:
-        warn("Git non trovato — non necessario per l'installazione")
-
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Pacchetti sistema (apt)
+# STEP 3 — Dipendenze sistema (apt / brew / winget)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def install_system_packages():
-    step(2, 7, "Pacchetti sistema (apt)")
+    step(3, 8, "Dipendenze sistema")
 
-    if platform.system() != "Linux":
-        warn("Pacchetti apt disponibili solo su Linux — salta")
-        return
+    if IS_LINUX:
+        _install_apt()
+    elif IS_MAC:
+        _install_brew()
+    elif IS_WINDOWS:
+        _install_winget()
 
+def _install_apt():
     if not cmd_exists("apt"):
-        warn("apt non trovato — salta installazione pacchetti sistema")
+        warn("apt non trovato — salta")
         return
 
-    to_install = []
-    for cmd, pkg, desc in APT_REQUIRED:
-        if cmd_exists(cmd):
-            ok(f"{pkg}: già installato ({desc})")
+    pkgs = []
+    checks = [
+        ("mpg123",    "mpg123",           "riproduzione audio TTS"),
+        ("parecord",  "pulseaudio-utils",  "registrazione microfono"),
+        ("portaudio19-dev", "portaudio19-dev", "sounddevice (Python audio)"),
+    ]
+    for binary, pkg, desc in checks:
+        if cmd_exists(binary):
+            ok(f"{pkg}: già presente ({desc})")
         else:
             warn(f"{pkg}: mancante ({desc})")
-            to_install.append(pkg)
+            pkgs.append(pkg)
 
-    if not to_install:
-        return
-
-    print(f"\n   Pacchetti da installare: {', '.join(to_install)}")
-    answer = input("   Installare con apt? (S/n): ").strip().lower()
-    if answer in ("", "s", "y", "yes", "si", "sì"):
+    if pkgs:
+        info(f"Installo: {', '.join(pkgs)}")
         try:
             run(["sudo", "apt", "update", "-qq"])
-            run(["sudo", "apt", "install", "-y"] + to_install)
-            ok(f"Pacchetti installati: {', '.join(to_install)}")
+            run(["sudo", "apt", "install", "-y"] + pkgs)
+            ok("Pacchetti apt installati")
         except Exception as e:
-            warn(f"Installazione apt fallita: {e}")
-            warn("Installa manualmente: sudo apt install " + " ".join(to_install))
-    else:
-        warn("Saltato — installa manualmente se necessario")
+            warn(f"apt fallito: {e} — installa manualmente: sudo apt install {' '.join(pkgs)}")
+
+def _install_brew():
+    # Installa Homebrew se mancante
+    if not cmd_exists("brew"):
+        info("Installo Homebrew...")
+        try:
+            run('/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+                shell=True)
+        except Exception as e:
+            warn(f"Homebrew fallito: {e}")
+            return
+
+    pkgs = []
+    checks = [
+        ("mpg123",    "mpg123",    "riproduzione audio TTS"),
+        ("portaudio", "portaudio", "sounddevice (Python audio)"),
+    ]
+    for binary, pkg, desc in checks:
+        if cmd_exists(binary):
+            ok(f"{pkg}: già presente ({desc})")
+        else:
+            warn(f"{pkg}: mancante ({desc})")
+            pkgs.append(pkg)
+
+    if pkgs:
+        info(f"Installo con brew: {', '.join(pkgs)}")
+        try:
+            run(["brew", "install"] + pkgs)
+            ok("Pacchetti brew installati")
+        except Exception as e:
+            warn(f"brew fallito: {e}")
+
+def _install_winget():
+    if not cmd_exists("winget"):
+        warn("winget non disponibile — salta pacchetti sistema")
+        return
+
+    # Su Windows mpg123 non esiste — usiamo ffplay (parte di ffmpeg)
+    if not cmd_exists("ffplay"):
+        info("Installo ffmpeg (per riproduzione audio TTS)...")
+        try:
+            run(["winget", "install", "-e", "--id", "Gyan.FFmpeg",
+                 "--accept-package-agreements", "--accept-source-agreements"])
+            ok("ffmpeg installato")
+        except Exception as e:
+            warn(f"ffmpeg fallito: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Virtualenv jarvisenv
+# STEP 4 — Virtualenv (solo Linux)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_venv():
-    step(3, 7, f"Ambiente virtuale ({VENV_NAME})")
+    step(4, 8, "Ambiente virtuale Python")
 
-    venv_path = Path(VENV_NAME)
+    if not IS_LINUX:
+        ok(f"{'macOS' if IS_MAC else 'Windows'}: venv non necessario — uso Python di sistema")
+        return
 
-    if venv_path.exists():
-        answer = input(f"   {VENV_NAME}/ esiste già. Ricrearlo? (s/N): ").strip().lower()
-        if answer in ("s", "y", "yes", "si"):
-            info(f"Rimuovo {VENV_NAME}/...")
-            shutil.rmtree(venv_path)
+    if VENV_DIR.exists():
+        if confirm(f"{VENV_DIR} esiste già. Ricrearlo?"):
+            info(f"Rimuovo {VENV_DIR}...")
+            shutil.rmtree(VENV_DIR)
         else:
-            ok(f"{VENV_NAME}/ esistente — mantenuto")
+            ok(f"Venv esistente mantenuto: {VENV_DIR}")
             return
 
-    info(f"Creo {VENV_NAME}/...")
+    info(f"Creo venv in {VENV_DIR}...")
     try:
-        run([sys.executable, "-m", "venv", VENV_NAME])
-        ok(f"{VENV_NAME}/ creato")
+        run([sys.executable, "-m", "venv", str(VENV_DIR)])
+        ok(f"Venv creato: {VENV_DIR}")
     except Exception as e:
         err(f"Creazione venv fallita: {e}")
         info("Prova: sudo apt install python3-venv")
         sys.exit(1)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 4 — Dipendenze Python
+# STEP 5 — Dipendenze Python
 # ══════════════════════════════════════════════════════════════════════════════
 
-def install_python_deps():
-    step(4, 7, "Dipendenze Python")
+PIP_PACKAGES = {
+    "Core": [
+        "requests>=2.31.0",
+        "numpy>=1.24.0",
+        "scipy>=1.11.0",
+        "noisereduce>=3.0.0",
+    ],
+    "STT": [
+        "faster-whisper>=1.0.0",
+    ],
+    "Audio": [
+        "sounddevice>=0.4.6",
+        "soundfile>=0.12.1",
+    ],
+    "TTS": [
+        "gTTS>=2.5.0",
+    ],
+    "Ricerca": [
+        "ddgs>=0.1.0",
+        "tavily-python>=0.3.0",
+    ],
+    "Opzionali": [
+        "resemblyzer>=0.1.4",
+        "webrtcvad>=2.0.10",
+        "discord.py>=2.3.0",
+        "speechbrain>=1.0.0",
+    ],
+}
 
-    pip = str(pip_in_venv())
+def install_python_deps():
+    step(5, 8, "Dipendenze Python")
+
+    pip = pip_cmd()
 
     # Aggiorna pip
     info("Aggiorno pip...")
-    run([pip, "install", "--upgrade", "pip", "-q"])
+    run(pip + ["install", "--upgrade", "pip", "-q"], check=False)
 
-    def install_group(name, packages, optional=False):
-        print(f"\n   📦 {name}:")
-        failed = []
+    optional_groups = {"Opzionali"}
+
+    for group, packages in PIP_PACKAGES.items():
+        optional = group in optional_groups
+        print(f"\n   📦 {group}{' (opzionali)' if optional else ''}:")
         for pkg in packages:
-            pkg_name = pkg.split(">=")[0].split("==")[0]
-            print(f"      {pkg_name}...", end=" ", flush=True)
-            try:
-                r = run([pip, "install", pkg, "-q"], check=False, capture=True)
-                if r.returncode == 0:
-                    print(f"{C.GREEN}✅{C.RESET}")
-                else:
-                    print(f"{C.YELLOW}⚠️{C.RESET}")
-                    failed.append(pkg)
-            except Exception as e:
+            name = pkg.split(">=")[0].split("==")[0]
+            print(f"      {name}...", end=" ", flush=True)
+            r = run(pip + ["install", pkg, "-q"], check=False, capture=True)
+            if r.returncode == 0:
+                print(f"{C.GREEN}✅{C.RESET}")
+            elif optional:
+                print(f"{C.YELLOW}⚠️  (opzionale){C.RESET}")
+            else:
                 print(f"{C.RED}❌{C.RESET}")
-                failed.append(pkg)
-
-        if failed and not optional:
-            warn(f"Pacchetti falliti: {failed}")
-        elif failed and optional:
-            warn(f"Opzionali non installati: {failed} — alcune funzionalità disabilitate")
-        return failed
-
-    install_group("Core",               PIP_CORE)
-    install_group("STT (Whisper)",       PIP_STT)
-    install_group("Audio I/O",           PIP_AUDIO)
-    install_group("TTS",                 PIP_TTS)
-    install_group("Ricerca web",         PIP_SEARCH)
-    install_group("Voice opzionali",     PIP_VOICE_OPTIONAL, optional=True)
-
-    # Discord — chiede se installare
-    print(f"\n   💙 Discord Bot (opzionale)")
-    answer = input("      Installare discord.py? (s/N): ").strip().lower()
-    if answer in ("s", "y", "yes", "si"):
-        install_group("Discord", PIP_DISCORD)
-
-    ok("Dipendenze Python installate")
+                warn(f"{name} obbligatorio — riprova manualmente: pip install {pkg}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 5 — File .env con API key
+# STEP 6 — Sposta file + patch OS-specific
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Patch da applicare ai file Python in base all'OS rilevato
+# Ogni entry: (file, stringa_originale, sostituzione_linux, sostituzione_mac, sostituzione_win)
+_PATCHES = [
+    # Player audio TTS
+    (
+        "voice_module.py",
+        "def find_tts_player():\n    for p in ('mpg123','ffplay','aplay','cvlc'):",
+        # Linux — ordine preferenziale con mpg123 prima
+        "def find_tts_player():\n    for p in ('mpg123','ffplay','aplay','cvlc'):",
+        # macOS — afplay è nativo, ffplay come fallback
+        "def find_tts_player():\n    for p in ('afplay','ffplay','mpg123','cvlc'):",
+        # Windows — ffplay (ffmpeg), nessun mpg123
+        "def find_tts_player():\n    for p in ('ffplay','mpg123','cvlc'):",
+    ),
+    # Mute mic: pactl disponibile solo su Linux
+    (
+        "voice_module.py",
+        "def _mute_mic(pa_name):",
+        # Linux — nessuna modifica
+        "def _mute_mic(pa_name):",
+        # macOS — sostituisci con osascript
+        "def _mute_mic(pa_name):  # macOS — usa osascript",
+        # Windows — sostituisci con nircmd/pycaw
+        "def _mute_mic(pa_name):  # Windows — mute via nircmd",
+    ),
+]
+
+# Blocchi completi da sostituire per mute/unmute su Mac e Windows
+_MUTE_LINUX = '''def _mute_mic(pa_name):
+    if not pa_name: return
+    try: subprocess.run(['pactl','set-source-mute',pa_name,'1'],capture_output=True,timeout=2)
+    except: pass
+
+def _unmute_mic(pa_name):
+    if not pa_name: return
+    try: subprocess.run(['pactl','set-source-mute',pa_name,'0'],capture_output=True,timeout=2)
+    except: pass'''
+
+_MUTE_MAC = '''def _mute_mic(pa_name):
+    try: subprocess.run(['osascript','-e','set volume input volume 0'],capture_output=True,timeout=2)
+    except: pass
+
+def _unmute_mic(pa_name):
+    try: subprocess.run(['osascript','-e','set volume input volume 100'],capture_output=True,timeout=2)
+    except: pass'''
+
+_MUTE_WIN = '''def _mute_mic(pa_name):
+    try:
+        subprocess.run(['nircmd','mutesysvolume','1'],capture_output=True,timeout=2)
+    except:
+        pass  # nircmd opzionale su Windows
+
+def _unmute_mic(pa_name):
+    try:
+        subprocess.run(['nircmd','mutesysvolume','0'],capture_output=True,timeout=2)
+    except:
+        pass'''
+
+def move_and_patch_files():
+    step(6, 8, f"Copia file → {DEST_DIR}")
+
+    # Crea cartella destinazione
+    DEST_DIR.mkdir(parents=True, exist_ok=True)
+    ok(f"Cartella: {DEST_DIR}")
+
+    # File da copiare (sono nella stessa cartella dell'installer)
+    src_dir = Path(__file__).parent
+    files = [
+        "jarvis_v6.py",
+        "voice_module.py",
+        "search_module.py",
+        "language_module.py",
+        "agent_module.py",
+        "jarvis_banner.py",
+    ]
+
+    for fname in files:
+        src = src_dir / fname
+        dst = DEST_DIR / fname
+        if src.exists():
+            shutil.copy2(src, dst)
+            ok(f"Copiato: {fname}")
+        else:
+            warn(f"Non trovato: {fname} — salta")
+
+    # Copia Modelfile
+    modelfile = src_dir.parent / "Modelfile"
+    if not modelfile.exists():
+        modelfile = src_dir / "Modelfile"
+    if modelfile.exists():
+        shutil.copy2(modelfile, DEST_DIR / "Modelfile")
+        ok("Copiato: Modelfile")
+
+    # Applica patch OS-specific
+    info(f"Applico patch per {OS}...")
+    _apply_os_patches()
+    ok("Patch applicate")
+
+def _apply_os_patches():
+    """Applica le patch OS-specific ai file copiati in DEST_DIR."""
+    voice_file = DEST_DIR / "voice_module.py"
+    if not voice_file.exists():
+        return
+
+    with open(voice_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Player audio
+    linux_player = "for p in ('mpg123','ffplay','aplay','cvlc'):"
+    mac_player   = "for p in ('afplay','ffplay','mpg123','cvlc'):"
+    win_player   = "for p in ('ffplay','mpg123','cvlc'):"
+
+    if IS_MAC and linux_player in content:
+        content = content.replace(linux_player, mac_player, 1)
+        info("  Player audio: mpg123 → afplay (macOS)")
+    elif IS_WINDOWS and linux_player in content:
+        content = content.replace(linux_player, win_player, 1)
+        info("  Player audio: mpg123 → ffplay (Windows)")
+
+    # 2. Mute/unmute microfono
+    if IS_MAC and _MUTE_LINUX in content:
+        content = content.replace(_MUTE_LINUX, _MUTE_MAC, 1)
+        info("  Mute mic: pactl → osascript (macOS)")
+    elif IS_WINDOWS and _MUTE_LINUX in content:
+        content = content.replace(_MUTE_LINUX, _MUTE_WIN, 1)
+        info("  Mute mic: pactl → nircmd (Windows)")
+
+    with open(voice_file, "w", encoding="utf-8") as f:
+        f.write(content)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 7 — .env + API key
 # ══════════════════════════════════════════════════════════════════════════════
 
 def setup_env():
-    step(5, 7, "Configurazione API key (.env)")
+    step(7, 8, "API Key (.env)")
 
-    env_path = Path(ENV_FILE)
-
-    # Carica valori esistenti
     existing = {}
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                existing[k.strip()] = v.strip()
-        info(f".env esistente trovato — aggiorno solo i campi vuoti")
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                if v.strip():
+                    existing[k.strip()] = v.strip()
+        info(f".env trovato con {len(existing)} chiavi impostate")
 
     keys = {
-        "DISCORD_TOKEN": {
-            "desc":     "Discord Bot Token (opzionale — per usare JARVIS da Discord)",
-            "hint":     "https://discord.com/developers/applications",
-            "optional": True,
-        },
         "TAVILY_API_KEY": {
-            "desc":     "Tavily AI Search (opzionale — 1000 ricerche/mese gratis)",
-            "hint":     "https://tavily.com",
-            "optional": True,
+            "desc":     "Tavily Search — ricerche web avanzate (CONSIGLIATO)",
+            "hint":     "Gratis su https://app.tavily.com  →  API Keys",
+            "optional": False,
         },
         "BRAVE_API_KEY": {
             "desc":     "Brave Search (opzionale — 2000 ricerche/mese gratis)",
@@ -310,171 +533,177 @@ def setup_env():
             "hint":     "https://gnews.io",
             "optional": True,
         },
+        "DISCORD_TOKEN": {
+            "desc":     "Discord Bot Token (opzionale)",
+            "hint":     "https://discord.com/developers/applications",
+            "optional": True,
+        },
     }
 
     new_values = dict(existing)
-
     print()
+
     for key, meta in keys.items():
         current = existing.get(key, "")
-        print(f"   {C.BOLD}{key}{C.RESET}")
+        tag = f"{C.YELLOW}(opzionale){C.RESET}" if meta["optional"] else f"{C.GREEN}(consigliato){C.RESET}"
+        print(f"   {C.BOLD}{key}{C.RESET} {tag}")
         print(f"   {meta['desc']}")
         print(f"   → {meta['hint']}")
-
         if current:
-            print(f"   Valore attuale: {current[:8]}... (invio per mantenere)")
+            print(f"   Valore attuale: {current[:10]}... (invio = mantieni)")
         else:
             print(f"   (invio per saltare)")
-
-        val = input(f"   > ").strip()
+        val = input("   > ").strip()
         if val:
             new_values[key] = val
             ok(f"{key} impostata")
         elif current:
             ok(f"{key} mantenuta")
         else:
-            warn(f"{key} non impostata — funzionalità opzionale disabilitata")
+            status = "disabilitata" if meta["optional"] else "MANCANTE — alcune ricerche useranno DDG"
+            warn(f"{key} non impostata — {status}")
         print()
 
-    # Scrivi .env
-    lines = ["# JARVIS v6.0 — API Keys\n# Non committare questo file su git!\n"]
+    # Scrivi .env in DEST_DIR
+    lines = ["# JARVIS v6.0 — API Keys\n# Non committare questo file!\n"]
     for key, meta in keys.items():
         lines.append(f"# {meta['desc']}")
-        val = new_values.get(key, "")
-        lines.append(f"{key}={val}\n")
+        lines.append(f"{key}={new_values.get(key, '')}\n")
+    ENV_FILE.write_text("\n".join(lines), encoding="utf-8")
 
-    env_path.write_text("\n".join(lines))
+    if not IS_WINDOWS:
+        os.chmod(ENV_FILE, 0o600)
 
-    # Proteggi il file (solo proprietario può leggere)
-    if platform.system() != "Windows":
-        os.chmod(env_path, 0o600)
-
-    ok(f".env creato (permessi 600)")
-
-    # Verifica .gitignore
-    gitignore = Path(".gitignore")
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if ".env" not in content:
-            gitignore.write_text(content + "\n.env\n")
-            ok(".env aggiunto a .gitignore")
-    else:
-        gitignore.write_text(".env\njarvisenv/\n__pycache__/\n*.pyc\n")
-        ok(".gitignore creato")
+    ok(f".env salvato in {ENV_FILE}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 6 — Script di avvio
+# STEP 8 — Script di avvio + modello Ollama
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_start_script():
-    step(6, 7, f"Script di avvio ({START_SCRIPT})")
+    step(8, 8, "Script di avvio + modello Ollama")
 
-    script_path = Path(START_SCRIPT)
-    project_dir = Path.cwd()
-    python_path = python_in_venv().resolve()
+    python = python_cmd()[0]
 
-    script = f"""#!/bin/bash
-# JARVIS v6.0 — Script di avvio
-# Generato automaticamente dall'installer
-
-cd "{project_dir}"
-
-# AMD GPU: evita errori HIP con resemblyzer/torch
-export HIP_VISIBLE_DEVICES=-1
-
-# Carica variabili .env
-if [ -f .env ]; then
-    export $(grep -v '^#' .env | grep -v '^$' | xargs)
-fi
-
-# Avvia JARVIS
-"{python_path}" jarvis_v6.py "$@"
-"""
-
-    script_path.write_text(script)
-
-    if platform.system() != "Windows":
-        os.chmod(script_path, 0o755)
-        ok(f"{START_SCRIPT} creato (eseguibile)")
+    # ── Script di avvio ───────────────────────────────────────────────────────
+    if IS_WINDOWS:
+        script = DEST_DIR / "avvia_jarvis.bat"
+        script.write_text(
+            f'@echo off\n'
+            f'cd /d "{DEST_DIR}"\n'
+            f'if exist .env for /f "tokens=1,* delims==" %%a in (.env) do set %%a=%%b\n'
+            f'"{python}" jarvis_v6.py %*\n',
+            encoding="utf-8"
+        )
+        ok(f"Script creato: {script}")
     else:
-        # Windows: crea anche .bat
-        bat = Path("avvia_jarvis.bat")
-        bat.write_text(f'@echo off\ncd /d "{project_dir}"\n"{python_path}" jarvis_v6.py %*\n')
-        ok(f"{START_SCRIPT} e avvia_jarvis.bat creati")
+        # Linux / macOS
+        env_loader = f'export $(grep -v \'^#\' "{ENV_FILE}" | grep -v \'^$\' | xargs)'
+        if IS_LINUX:
+            activate = f'source "{VENV_DIR}/bin/activate"'
+            hip_fix  = "export HIP_VISIBLE_DEVICES=-1  # AMD GPU fix"
+        else:
+            activate = "# macOS: nessun venv"
+            hip_fix  = ""
 
-    # Script per setup speaker verification
-    speaker_script = Path("setup_speaker.sh")
-    speaker_script.write_text(f"""#!/bin/bash
-# Configura il riconoscimento vocale del proprietario
-cd "{project_dir}"
-export HIP_VISIBLE_DEVICES=-1
-"{python_path}" voice_module.py --setup-speaker
-""")
-    if platform.system() != "Windows":
-        os.chmod(speaker_script, 0o755)
-    ok("setup_speaker.sh creato")
+        script = DEST_DIR / "avvia_jarvis.sh"
+        script.write_text(
+            f'#!/bin/bash\n'
+            f'cd "{DEST_DIR}"\n'
+            f'{hip_fix}\n'
+            f'{activate}\n'
+            f'if [ -f "{ENV_FILE}" ]; then\n'
+            f'    {env_loader}\n'
+            f'fi\n'
+            f'"{python}" jarvis_v6.py "$@"\n',
+            encoding="utf-8"
+        )
+        os.chmod(script, 0o755)
+        ok(f"Script creato: {script}")
+
+        # setup_speaker.sh
+        speaker = DEST_DIR / "setup_speaker.sh"
+        speaker.write_text(
+            f'#!/bin/bash\n'
+            f'cd "{DEST_DIR}"\n'
+            f'{activate}\n'
+            f'"{python}" voice_module.py --setup-speaker\n',
+            encoding="utf-8"
+        )
+        os.chmod(speaker, 0o755)
+        ok(f"Script creato: {speaker}")
+
+    # ── Modello Ollama ─────────────────────────────────────────────────────────
+    if cmd_exists("ollama"):
+        modelfile = DEST_DIR / "Modelfile"
+        r = run(["ollama", "list"], capture=True, check=False)
+        has_model = "jarvisQwen" in (r.stdout if r.returncode == 0 else "")
+
+        if has_model:
+            ok("Modello jarvisQwen già presente")
+        else:
+            info("Scarico modello base qwen2.5:7b (~4.7GB)...")
+            print(f"   {C.YELLOW}Potrebbe richiedere qualche minuto...{C.RESET}")
+            try:
+                run(["ollama", "pull", "qwen2.5:7b"])
+                ok("qwen2.5:7b scaricato")
+            except Exception as e:
+                warn(f"Pull fallito: {e} — esegui manualmente: ollama pull qwen2.5:7b")
+
+            if modelfile.exists():
+                info("Creo modello jarvisQwen...")
+                try:
+                    run(["ollama", "create", "jarvisQwen", "-f", str(modelfile)])
+                    ok("Modello jarvisQwen creato")
+                except Exception as e:
+                    warn(f"Create fallito: {e}")
+                    warn(f"Esegui: ollama create jarvisQwen -f {modelfile}")
+            else:
+                warn("Modelfile non trovato — crea il modello manualmente")
+    else:
+        warn("Ollama non disponibile — modello non creato")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 7 — Verifica finale
+# VERIFICA FINALE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def verify_installation():
-    step(7, 7, "Verifica installazione")
+def verify():
+    print(f"\n{C.BOLD}Verifica installazione{C.RESET}")
+    print("─" * 54)
 
-    python = str(python_in_venv())
-    all_ok = True
-
+    python = python_cmd()
     checks = [
         ("requests",       "import requests"),
         ("numpy",          "import numpy"),
         ("faster_whisper", "from faster_whisper import WhisperModel"),
         ("sounddevice",    "import sounddevice"),
-        ("soundfile",      "import soundfile"),
         ("gtts",           "from gtts import gTTS"),
-        ("scipy",          "import scipy"),
         ("ddgs",           "from ddgs import DDGS"),
     ]
-
-    optional_checks = [
-        ("resemblyzer",    "from resemblyzer import VoiceEncoder"),
-        ("webrtcvad",      "import webrtcvad"),
-        ("discord",        "import discord"),
-        ("tavily",         "from tavily import TavilyClient"),
+    optional = [
+        ("resemblyzer",  "from resemblyzer import VoiceEncoder"),
+        ("webrtcvad",    "import webrtcvad"),
+        ("speechbrain",  "import speechbrain"),
+        ("discord",      "import discord"),
+        ("tavily",       "from tavily import TavilyClient"),
+        ("noisereduce",  "import noisereduce"),
     ]
 
-    print("\n   Dipendenze obbligatorie:")
-    for name, import_stmt in checks:
-        r = run([python, "-c", import_stmt], check=False, capture=True)
+    all_ok = True
+    print("\n   Obbligatorie:")
+    for name, stmt in checks:
+        r = run(python + ["-c", stmt], check=False, capture=True)
         if r.returncode == 0:
             print(f"   {C.GREEN}✅{C.RESET} {name}")
         else:
-            print(f"   {C.RED}❌{C.RESET} {name} — MANCANTE")
+            print(f"   {C.RED}❌{C.RESET} {name}")
             all_ok = False
 
-    print("\n   Dipendenze opzionali:")
-    for name, import_stmt in optional_checks:
-        r = run([python, "-c", import_stmt], check=False, capture=True)
-        if r.returncode == 0:
-            print(f"   {C.GREEN}✅{C.RESET} {name}")
-        else:
-            print(f"   {C.YELLOW}⚠️{C.RESET}  {name} — non installato (opzionale)")
-
-    # Verifica Ollama
-    print("\n   Servizi:")
-    if cmd_exists("ollama"):
-        r = run(["ollama", "list"], check=False, capture=True)
-        if r.returncode == 0:
-            models = [l for l in r.stdout.splitlines() if "jarvisQwen" in l or "qwen" in l.lower()]
-            if models:
-                print(f"   {C.GREEN}✅{C.RESET} Ollama + modello trovato")
-            else:
-                print(f"   {C.YELLOW}⚠️{C.RESET}  Ollama ok ma nessun modello JARVIS trovato")
-                print(f"         Esegui: ollama pull qwen2.5:7b && ollama create jarvisQwen -f Modelfile")
-        else:
-            print(f"   {C.YELLOW}⚠️{C.RESET}  Ollama installato ma non in esecuzione")
-    else:
-        print(f"   {C.RED}❌{C.RESET} Ollama non trovato")
-        all_ok = False
+    print("\n   Opzionali:")
+    for name, stmt in optional:
+        r = run(python + ["-c", stmt], check=False, capture=True)
+        sym = f"{C.GREEN}✅{C.RESET}" if r.returncode == 0 else f"{C.YELLOW}⚠️ {C.RESET}"
+        print(f"   {sym} {name}")
 
     return all_ok
 
@@ -483,34 +712,29 @@ def verify_installation():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def print_summary(success):
-    print("\n" + "═" * 52)
+    print("\n" + "═" * 54)
     if success:
         print(f"{C.GREEN}{C.BOLD}✅ JARVIS installato con successo!{C.RESET}")
     else:
         print(f"{C.YELLOW}{C.BOLD}⚠️  Installazione completata con avvisi{C.RESET}")
-    print("═" * 52)
+    print("═" * 54)
+
+    if IS_WINDOWS:
+        avvia = f'cd "{DEST_DIR}" && avvia_jarvis.bat'
+    else:
+        avvia = f'{DEST_DIR}/avvia_jarvis.sh'
 
     print(f"""
-{C.BOLD}Prossimi passi:{C.RESET}
+{C.BOLD}File installati in:{C.RESET} {DEST_DIR}
 
-1. Crea il modello Ollama (se non già fatto):
-   {C.BLUE}ollama pull qwen2.5:7b
-   ollama create jarvisQwen -f Modelfile{C.RESET}
+{C.BOLD}Avvia JARVIS:{C.RESET}
+   {C.BLUE}{avvia}{C.RESET}
 
-2. Avvia JARVIS:
-   {C.BLUE}./{START_SCRIPT}{C.RESET}
+{C.BOLD}(Opzionale) Configura riconoscimento vocale:{C.RESET}
+   {C.BLUE}{DEST_DIR}/setup_speaker.sh{C.RESET}
 
-3. (Opzionale) Configura riconoscimento vocale:
-   {C.BLUE}./setup_speaker.sh{C.RESET}
-
-4. (Opzionale) Avvia SearXNG per ricerche locali:
+{C.BOLD}(Opzionale) SearXNG ricerche locali:{C.RESET}
    {C.BLUE}docker compose up -d{C.RESET}
-
-{C.BOLD}File creati:{C.RESET}
-   📁 {VENV_NAME}/          virtualenv Python
-   🔑 {ENV_FILE}              API keys (non committare!)
-   🚀 {START_SCRIPT}    script di avvio
-   🎙️  setup_speaker.sh  configura voce
 """)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -518,36 +742,30 @@ def print_summary(success):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    print("═" * 52)
-    print(f"{C.BOLD}🤖 JARVIS v6.0 — Installer{C.RESET}")
-    print("═" * 52)
-    print(f"Directory: {Path.cwd()}")
-    print(f"Python: {sys.executable}")
-    print()
-
-    # Verifica che siamo nella directory giusta
-    if not Path("jarvis_v6.py").exists():
-        err("jarvis_v6.py non trovato!")
-        err("Esegui l'installer dalla directory del progetto JARVIS.")
-        sys.exit(1)
+    print("═" * 54)
+    print(f"{C.BOLD}{C.CYAN}🤖 JARVIS v6.0 — Installer{C.RESET}")
+    print(f"   Sistema: {OS} {platform.release()}")
+    print(f"   Python:  {sys.executable}")
+    print("═" * 54)
 
     try:
         check_system()
+        install_ollama()
         install_system_packages()
         create_venv()
         install_python_deps()
+        move_and_patch_files()
         setup_env()
         create_start_script()
-        success = verify_installation()
-        print_summary(success)
+        ok_result = verify()
+        print_summary(ok_result)
 
     except KeyboardInterrupt:
-        print(f"\n\n{C.YELLOW}Installazione interrotta dall'utente.{C.RESET}")
+        print(f"\n\n{C.YELLOW}Installazione interrotta.{C.RESET}")
         sys.exit(1)
     except Exception as e:
         err(f"Errore imprevisto: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         sys.exit(1)
 
 
