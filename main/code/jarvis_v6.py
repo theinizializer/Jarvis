@@ -18,6 +18,30 @@ import base64
 import json
 import os
 import queue
+
+# ── Carica .env automaticamente ───────────────────────────────────────────────
+# Cerca .env nella stessa cartella dello script, poi in ~/jarvis_memory
+def _load_dotenv():
+    from pathlib import Path
+    candidates = [
+        Path(__file__).parent / ".env",
+        Path.home() / "Documenti" / "modelli" / ".env",
+        Path.home() / "Documents" / "modelli" / ".env",
+        Path.home() / "jarvis_memory" / ".env",
+    ]
+    for env_path in candidates:
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip(); val = val.strip()
+                if key and val and key not in os.environ:
+                    os.environ[key] = val
+            break  # carica solo il primo trovato
+_load_dotenv()
+# ─────────────────────────────────────────────────────────────────────────────
 import re
 import shlex
 import signal
