@@ -56,10 +56,20 @@ from pathlib import Path
 import requests
 
 try:
-    from jarvis_banner import print_banner as _print_jarvis_banner
+    from jarvis_banner import (
+        print_banner        as _print_jarvis_banner,
+        init_live_banner    as _init_live_banner,
+        reprint_menu        as _reprint_menu,
+        start_speaking_anim as _start_speaking_anim,
+        stop_speaking_anim  as _stop_speaking_anim,
+    )
     BANNER_OK = True
 except ImportError:
     BANNER_OK = False
+    def _init_live_banner(bot, lang_mgr=None): return None
+    def _reprint_menu(lang): pass
+    def _start_speaking_anim(): pass
+    def _stop_speaking_anim(): pass
 
 try:
     from search_module import SearchModule
@@ -500,11 +510,24 @@ from voice_module import (
     WHISPER_OK, SD_OK, GTTS_OK, RESEMBLYZER_OK
 )
 
+def _set_ollama_env():
+    """
+    Imposta le variabili d'ambiente per Ollama prima dell'avvio.
+    OLLAMA_NUM_THREADS=11 → usa tutti i thread dei core 1-5 (2-11)
+    OLLAMA_MAX_LOADED_MODELS=1 → un solo modello in RAM, niente sprechi
+    """
+    os.environ.setdefault("OLLAMA_NUM_THREADS", "11")
+    os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
+    os.environ.setdefault("OLLAMA_NUM_PARALLEL", "1")
+
+
 def ensure_ollama() -> bool:
+    _set_ollama_env()
     for attempt in range(2):
         try:
             requests.get("http://localhost:11434", timeout=2)
             print("✅ Ollama attivo")
+            _pin_ollama_cores()   # assicura pinning anche se già avviato
             return True
         except Exception:
             if attempt == 0:
@@ -516,12 +539,14 @@ def ensure_ollama() -> bool:
         time.sleep(3)
         requests.get("http://localhost:11434", timeout=2)
         print("✅ Ollama avviato via systemctl")
+        _pin_ollama_cores()
         return True
     except Exception:
         pass
     try:
         subprocess.Popen(
-            ["ollama", "serve"],
+            # taskset -c 2-11 → core 1-5 (thread 2,3,4,5,6,7,8,9,10,11)
+            ["taskset", "-c", "2-11", "ollama", "serve"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -539,6 +564,43 @@ def ensure_ollama() -> bool:
     except FileNotFoundError:
         print("❌ Ollama non installato")
     return False
+
+
+def _pin_ollama_cores():
+    """
+    Pinna tutti i processi ollama ai core 1-5 (thread 2-11).
+    Pinna il processo JARVIS corrente al core 0 (thread 0-1).
+    Funziona silenziosamente — se taskset non è disponibile, salta.
+    """
+    try:
+        # Trova i PID di tutti i processi ollama
+        result = subprocess.run(
+            ["pgrep", "-f", "ollama"],
+            capture_output=True, text=True, timeout=3
+        )
+        pids = result.stdout.strip().splitlines()
+        for pid in pids:
+            pid = pid.strip()
+            if pid:
+                subprocess.run(
+                    ["taskset", "-cp", "2-11", pid],
+                    capture_output=True, timeout=3, check=False
+                )
+        if pids:
+            print(f"  CPU: Ollama pinned → core 1-5 (thread 2-11) [{len(pids)} processi]")
+    except (FileNotFoundError, Exception):
+        pass  # taskset non disponibile — continua senza pinning
+
+    try:
+        # Pinna JARVIS al core 0 (thread 0 e 1)
+        my_pid = str(os.getpid())
+        subprocess.run(
+            ["taskset", "-cp", "0-1", my_pid],
+            capture_output=True, timeout=3, check=False
+        )
+        print("  CPU: JARVIS pinned → core 0 (thread 0-1)")
+    except Exception:
+        pass
 
 
 
@@ -1722,15 +1784,19 @@ class Jarvis:
                     'cvlc':   ['cvlc', '--play-and-exit', '-q', str(tmp)],
                 }
                 c = cmd_map.get(player, [player, str(tmp)])
+                # Avvia animazione faccina
+                _start_speaking_anim()
                 result = subprocess.run(
                     c, timeout=30,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
+                _stop_speaking_anim()
                 if result.returncode != 0:
                     err = result.stderr.decode(errors='ignore').strip()
                     print(f"\n⚠️ TTS player errore (rc={result.returncode}): {err[:100]}", flush=True)
 
             except Exception as e:
+                _stop_speaking_anim()
                 print(f"\n⚠️ TTS errore: {e}", flush=True)
             finally:
                 tmp.unlink(missing_ok=True)
@@ -1741,6 +1807,7 @@ class Jarvis:
         try:
             subprocess.run(['sudo', 'systemctl', 'restart', 'ollama'], timeout=10, check=False)
             time.sleep(3)
+            _pin_ollama_cores()
             self._stats["errors"] = 0
             print("✅ Riavviato")
         except Exception as e:
@@ -1784,6 +1851,12 @@ class Jarvis:
             if cmd_part in ('/esci', '/exit', '/quit', '/sortir', '/beenden',
                             '/salir', '/sair', '/выход', '/終了'):
                 return "__EXIT__"
+            if cmd_part in ('/dormi', '/sleep', '/blocca', '/lock'):
+                return "__SLEEP__"
+            if cmd_part in ('/aggiungi_voce', '/add_voice', '/nueva_voz', '/neue_stimme'):
+                return "__ADD_VOICE__"
+            if cmd_part in ('/profili_voce', '/voice_profiles', '/voci', '/voices'):
+                return "__LIST_VOICES__"
 
             # Comandi memoria — tutte le lingue
             _remember_cmds = ('/memorizza', '/remember', '/mémorise', '/memorize',
@@ -1852,7 +1925,21 @@ class Jarvis:
                     return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
                 if result:
                     self.tts_lang = self._lang.tts_lang
+                    # Cambio lingua → ricarica il banner con i comandi tradotti
+                    if result.startswith("🌍") or result.startswith("✅") and "lingua" in result.lower():
+                        return "__LANG_CHANGED__"
                     return result
+
+            # Comando slash non riconosciuto — non mandare al modello
+            _nl = "\n"
+            _unknown_cmd_msg = {
+                "it": "❌ Comando non trovato: " + cmd_part + _nl + "   Digita /aiuto per la lista comandi",
+                "fr": "❌ Commande inconnue : " + cmd_part + _nl + "   Tapez /aide pour la liste",
+                "en": "❌ Unknown command: " + cmd_part + _nl + "   Type /help for command list",
+                "de": "❌ Unbekannter Befehl: " + cmd_part + _nl + "   /hilfe für die Liste",
+                "es": "❌ Comando desconocido: " + cmd_part + _nl + "   /ayuda para la lista",
+            }.get(self.tts_lang, "❌ Unknown command: " + cmd_part)
+            return _unknown_cmd_msg
 
         # Attiva agente per richieste complesse
         if AGENT_OK and self._agent and should_use_agent(user_msg):
@@ -2500,7 +2587,10 @@ def main():
     sys_lang = lang_mgr.current
     print(f"🌍 {lang_mgr.format_status()}")
 
-    sudo_pass = input("Password sudo (invio per saltare): ").strip() or None
+    # Legge sudo da env/secrets — chiede solo se non trovata
+    sudo_pass = os.environ.get("SUDO_PASSWORD", "").strip() or None
+    if not sudo_pass:
+        sudo_pass = input("Password sudo (invio per saltare): ").strip() or None
     tts       = input("TTS voce? (s/N): ").strip().lower() == 's'
     disc      = input("Discord bot? (s/N): ").strip().lower() == 's'
 
@@ -2569,17 +2659,66 @@ def main():
         bot.start_discord()
         time.sleep(2)
 
-    sep = "=" * 52
-    print(f"\n{sep}")
-    print("✅ JARVIS v6.0 PRONTO")
-    print(sep)
-    print("💾 /memorizza <fatto>  | 📝 /memoria | 🗑️ /dimentica")
-    print("📊 /stats | 🔊 /tts | 🔄 /modalita | 👋 /esci")
-    print("🔍 /cerca <q> | 🌤️ /meteo <città> | 📰 /notizie | 📖 /wiki <q>")
-    print("🌍 /lingua | /cambia lingua | /aggiungi lingua")
-    print("─" * 52)
-    print("💡 Tutti i comandi iniziano con /")
-    print(f"{sep}\n")
+    # ── Secrets / PIN ────────────────────────────────────────────────────────
+    # Carica SecretsManager se disponibile
+    try:
+        from jarvis_secrets import SecretsManager as _SM
+        _secrets_mgr = _SM()
+        _secrets_mgr.load_into_env()
+        # Aggiorna sudo_pass se ora disponibile via secrets
+        if not sudo_pass:
+            sudo_pass = os.environ.get("SUDO_PASSWORD", "").strip() or None
+            if sudo_pass:
+                bot.sudo_pass = sudo_pass
+    except ImportError:
+        _secrets_mgr = None
+
+    # ── Avvio LiveBanner (pulisce schermo e ridisegna in-place) ─────────────
+    # Il banner statico già stampato da _print_banner viene rimpiazzato.
+    # Da questo momento la zona A è gestita dal thread LiveBanner.
+    _vi_ref    = [voice_input]
+    _status_bar = _init_live_banner(bot, lang_mgr)   # pulisce schermo, disegna, avvia thread
+
+    # ── Buffer conversazione ──────────────────────────────────────────────────
+    _chat_buf: list[str] = []
+
+    def _chat_print(text: str):
+        if not text:
+            return
+        print(text)
+        lines = text.splitlines()
+        _chat_buf.extend(lines)
+        if len(_chat_buf) > 500:
+            del _chat_buf[:-500]
+
+    # ── PIN di sessione (SOLO modalità tastiera) ──────────────────────────────
+    _session_active = True
+    SESSION_TIMEOUT = 120
+    _session_last_t = time.time()
+
+    def _request_pin(prompt="🔐 PIN: ") -> bool:
+        """Chiede il PIN. Ritorna True se corretto o se nessun PIN configurato."""
+        if _secrets_mgr is None or not _secrets_mgr.has_pin:
+            return True
+        import getpass
+        try:
+            entered = getpass.getpass(f"   {prompt}")
+        except Exception:
+            entered = input(f"   {prompt}").strip()
+        if not _secrets_mgr.verify_pin(entered):
+            print("   ❌ PIN errato"); return False
+        return True
+
+    # PIN richiesto solo se modalità tastiera
+    if not use_voice and _secrets_mgr and _secrets_mgr.has_pin:
+        print("🔐 Sessione bloccata — inserisci PIN per iniziare")
+        _attempts = 0
+        while not _request_pin():
+            _attempts += 1
+            if _attempts >= 3:
+                print("❌ Troppi tentativi — uscita"); sys.exit(1)
+        print("✅ Accesso consentito\n")
+        _session_last_t = time.time()
 
     # ── Loop principale ───────────────────────────────────────────────────────
     while True:
@@ -2601,10 +2740,37 @@ def main():
                 if not want_keyboard:
                     break
                 use_voice = False
-                print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA\n{sep}\n")
+                if _secrets_mgr and _secrets_mgr.has_pin:
+                    print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA — inserisci PIN\n{sep}\n")
+                    _attempts = 0
+                    while not _request_pin():
+                        _attempts += 1
+                        if _attempts >= 3:
+                            print("❌ Troppi tentativi — uscita"); raise SystemExit(1)
+                    _session_active = True
+                    _session_last_t = time.time()
+                    print("✅ Accesso consentito\n")
+                else:
+                    print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA\n{sep}\n")
                 continue
 
-            user_input = input("⌨️  Tu: ").strip()
+            # Timeout sessione (solo tastiera)
+            if _secrets_mgr and _secrets_mgr.has_pin and _session_active:
+                if time.time() - _session_last_t > SESSION_TIMEOUT:
+                    print("\n⏰ Sessione scaduta — inserisci PIN")
+                    _session_active = False
+            if _secrets_mgr and _secrets_mgr.has_pin and not _session_active:
+                print("🔐 Sessione bloccata — inserisci PIN per continuare")
+                _attempts = 0
+                while not _request_pin():
+                    _attempts += 1
+                    if _attempts >= 3:
+                        print("❌ Troppi tentativi — uscita"); raise SystemExit(1)
+                _session_active = True
+                _session_last_t = time.time()
+                print("✅ Sessione riaperta\n")
+
+            user_input = input("Tu: ").strip()
 
             if user_input.lower() in ('microfono', 'vocale', 'modalità', 'modalita',
                                       'cambia modalità', 'cambia modalita',
@@ -2629,6 +2795,7 @@ def main():
 
             print()
             result = bot.process(user_input)
+            _session_last_t = time.time()
             if result == "__EXIT__":
                 print("\n👋 Ciao!")
                 break
@@ -2640,21 +2807,176 @@ def main():
                             voice_input = VoiceInput(mic)
                     if voice_input:
                         use_voice = True
+                        _vi_ref[0] = voice_input
+                        _session_active = True  # in voce PIN non serve
                         print("🎙️  Passato a modalità vocale")
                     else:
                         print("❌ Impossibile attivare il microfono")
                 else:
                     print("⚠️ Dipendenze vocali non disponibili")
+            elif result == "__LANG_CHANGED__":
+                # Lingua cambiata — aggiorna tts_lang
+                bot.tts_lang = lang_mgr.tts_lang
+                # Sincronizza speaker verifier
+                if voice_input and hasattr(voice_input, '_speaker_ref'):
+                    sp = voice_input._speaker_ref
+                    if sp and hasattr(sp, 'current_lang'):
+                        sp.current_lang = bot.tts_lang
+                _new_lang = bot.tts_lang.upper()
+                print(f"\n  Lingua cambiata → {_new_lang}")
+                # Ristampa il menu comandi nella nuova lingua (senza ridisegnare tutto il banner)
+                _reprint_menu(bot.tts_lang)
+            elif result == "__SLEEP__":
+                _session_active = False
+                print("💤 Sessione bloccata — a presto!")
+                continue
+            elif result == "__ADD_VOICE__":
+                sp = getattr(voice_input, '_speaker_ref', None) if voice_input else None
+                # Se non c'è un microfono attivo, lo inizializziamo al volo
+                if voice_input is None and SD_OK and WHISPER_OK:
+                    print("\n  Scegli il microfono per la registrazione:")
+                    _tmp_mic = choose_microphone()
+                    if _tmp_mic:
+                        voice_input = VoiceInput(_tmp_mic)
+                        _speaker_tmp = SpeakerVerifier()
+                        voice_input._speaker_ref = _speaker_tmp
+                        voice_input._lang_ref = lang_mgr
+                        sp = _speaker_tmp
+                        print("  Microfono pronto.")
+                    else:
+                        print("  Nessun microfono selezionato.")
+                if sp and hasattr(sp, 'add_profile'):
+                    _vname = input("  Nome utente (es. radostin): ").strip().lower() or "owner"
+                    _vlang = bot.tts_lang
+                    print(f"\n  Parla per 8-10 secondi in {_vlang.upper()}...")
+                    _vaudio = voice_input._record_sd(timeout=12.0, silence_sec=10.0)
+                    if _vaudio is not None:
+                        sp.add_profile(_vaudio, _vname, _vlang)
+                        print(f"  Profilo '{_vname}' salvato.")
+                    else:
+                        print("  Registrazione troppo corta — riprova")
+                elif not SD_OK or not WHISPER_OK:
+                    print("  Dipendenze audio mancanti (sounddevice / faster-whisper).")
+            elif result == "__LIST_VOICES__":
+                # Ottieni o crea speaker verifier
+                sp = getattr(voice_input, '_speaker_ref', None) if voice_input else None
+
+                # Se non c'è microfono attivo, inizializzalo al volo (come per __ADD_VOICE__)
+                _tmp_vi = None
+                if sp is None and SD_OK and WHISPER_OK:
+                    _tmp_mic = choose_microphone()
+                    if _tmp_mic:
+                        _tmp_vi = VoiceInput(_tmp_mic)
+                        _tmp_sp = SpeakerVerifier()
+                        _tmp_vi._speaker_ref = _tmp_sp
+                        _tmp_vi._lang_ref = lang_mgr
+                        sp = _tmp_sp
+                        voice_input = _tmp_vi
+                        _vi_ref[0]  = _tmp_vi
+
+                if sp is None:
+                    print("  Dipendenze audio mancanti (sounddevice / faster-whisper).")
+                    print()
+                    continue
+
+                # ── Mostra profili esistenti ──────────────────────────────────
+                while True:
+                    profiles = sp.list_profiles() if hasattr(sp, 'list_profiles') else []
+                    print()
+                    if profiles:
+                        print("  Profili vocali registrati:")
+                        for idx, (_pn, _pl) in enumerate(sorted(profiles), 1):
+                            _pm = "  <- attivo" if _pl == bot.tts_lang else ""
+                            print(f"    {idx}. {_pn} [{_pl.upper()}]{_pm}")
+                    else:
+                        print("  Nessun profilo registrato.")
+
+                    print()
+                    print("  a) Aggiungi nuovo profilo")
+                    if profiles:
+                        print("  d) Elimina profilo")
+                    print("  q) Esci")
+                    print()
+                    scelta = input("  Scelta: ").strip().lower()
+
+                    if scelta == 'q' or scelta == '':
+                        print()
+                        break
+
+                    elif scelta == 'd':
+                        # ── Elimina profilo ───────────────────────────────────
+                        if not profiles:
+                            print("  Nessun profilo da eliminare.")
+                            continue
+                        _sorted = sorted(profiles)
+                        print()
+                        for idx, (_pn, _pl) in enumerate(_sorted, 1):
+                            print(f"    {idx}. {_pn} [{_pl.upper()}]")
+                        print()
+                        _del_in = input("  Numero da eliminare (invio per annullare): ").strip()
+                        if not _del_in:
+                            print("  Annullato.")
+                            continue
+                        try:
+                            _del_idx = int(_del_in) - 1
+                            if not 0 <= _del_idx < len(_sorted):
+                                raise ValueError
+                        except ValueError:
+                            print("  Numero non valido.")
+                            continue
+                        _del_name, _del_lang = _sorted[_del_idx]
+                        _conf = input(f"  Elimina '{_del_name} [{_del_lang.upper()}]'? (s/N): ").strip().lower()
+                        if _conf == 's':
+                            _del_key = f"{_del_name}_{_del_lang}"
+                            sp._profiles.pop(_del_key, None)
+                            _del_path = sp._dir / f"{_del_name}_{_del_lang}.npy"
+                            if _del_path.exists():
+                                _del_path.unlink()
+                            print(f"  Profilo '{_del_name} [{_del_lang.upper()}]' eliminato.")
+                        else:
+                            print("  Annullato.")
+                        print()
+
+                    elif scelta == 'a':
+                        _vname = input("  Nome utente (es. radostin): ").strip().lower()
+                        if not _vname:
+                            print("  Nome non valido.")
+                            continue
+
+                        # Lingua: usa quella corrente o chiede
+                        print(f"  Lingua [{bot.tts_lang.upper()}] (invio per confermare): ", end="")
+                        _vlang_in = input().strip().lower()
+                        _vlang = _vlang_in if _vlang_in else bot.tts_lang
+
+                        print(f"\n  Parla per 8-10 secondi in {_vlang.upper()}...")
+                        print("  (premi Invio quando sei pronto)")
+                        input()
+                        print("  Registrazione in corso...")
+                        _vaudio = voice_input._record_sd(timeout=12.0, silence_sec=10.0)
+                        if _vaudio is not None and len(_vaudio) > 0:
+                            sp.add_profile(_vaudio, _vname, _vlang)
+                            print(f"  Profilo '{_vname}' [{_vlang.upper()}] salvato.")
+                        else:
+                            print("  Registrazione troppo corta — riprova.")
+                        print()
+
+                    else:
+                        print("  Scelta non valida.")
+
             else:
                 if result:
-                    # Solo per comandi slash — le risposte normali
-                    # sono già stampate e lette dal TTS durante lo streaming
-                    print(result)
+                    _chat_print(result)
                     bot._tts_say(result)
+                    # Sincronizza lingua con speaker verifier
+                    if voice_input and hasattr(voice_input, '_speaker_ref'):
+                        sp = voice_input._speaker_ref
+                        if sp and hasattr(sp, 'current_lang'):
+                            sp.current_lang = bot.tts_lang
                 print()
 
         except KeyboardInterrupt:
             print("\n\n👋 Ctrl+C")
+            _status_bar.stop()
             break
         except Exception as e:
             import traceback
