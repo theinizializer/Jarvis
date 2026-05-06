@@ -51,6 +51,7 @@ except ImportError:
 # ── Costanti ──────────────────────────────────────────────────────────────────
 SAMPLE_RATE       = 16000
 SPEAKER_PROFILE   = Path.home() / "jarvis_memory" / "speaker_profile.npy"
+PROFILES_DIR      = Path.home() / "jarvis_memory" / "voice_profiles"
 SPEAKER_THRESHOLD = 0.70
 SESSION_TIMEOUT   = 120
 
@@ -283,40 +284,149 @@ class TTSEngine:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SpeakerVerifier:
-    def __init__(self, profile_path=SPEAKER_PROFILE, threshold=SPEAKER_THRESHOLD):
-        self._path=Path(profile_path); self._threshold=threshold
-        self._profile=None; self._encoder=None
-        if RESEMBLYZER_OK:
-            import torch
-            self._encoder=VoiceEncoder(device='cpu'); self._load()
+    """
+    Gestisce profili vocali multipli per nome e lingua.
 
-    def _load(self):
-        if self._path.exists():
-            try: self._profile=np.load(str(self._path)); print("👤 Speaker: ✅ profilo caricato"); return
-            except: pass
-        print("👤 Speaker: ⚠️  nessun profilo (usa --setup-speaker)")
+    Struttura file:
+        ~/jarvis_memory/voice_profiles/
+            radostin_it.npy
+            radostin_en.npy
+            marco_it.npy
+            ...
+
+    Compatibilità: mantiene supporto per il vecchio speaker_profile.npy
+    migrandolo automaticamente come profilo "owner_it".
+    """
+
+    def __init__(self, profiles_dir=PROFILES_DIR, threshold=SPEAKER_THRESHOLD):
+        self._dir = Path(profiles_dir)
+        self._threshold = threshold
+        self._encoder = None
+        # dizionario: "nome_lang" -> embedding numpy
+        self._profiles: dict = {}
+        # lingua corrente (aggiornata da VoiceModule)
+        self.current_lang = "it"
+
+        if RESEMBLYZER_OK:
+            self._encoder = VoiceEncoder(device="cpu")
+            self._load_all()
+
+    def _profile_key(self, name: str, lang: str) -> str:
+        return f"{name.lower()}_{lang.lower()}"
+
+    def _profile_path(self, name: str, lang: str) -> Path:
+        return self._dir / f"{name.lower()}_{lang.lower()}.npy"
+
+    def _load_all(self):
+        """Carica tutti i profili .npy dalla cartella voice_profiles."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+        # Migrazione automatica vecchio profilo singolo
+        old_path = SPEAKER_PROFILE
+        if old_path.exists() and not list(self._dir.glob("*.npy")):
+            try:
+                emb = np.load(str(old_path))
+                new_path = self._profile_path("owner", "it")
+                np.save(str(new_path), emb)
+                print("👤 Migrato profilo legacy → owner_it")
+            except Exception:
+                pass
+
+        # Carica tutti i file .npy
+        found = list(self._dir.glob("*.npy"))
+        for p in found:
+            try:
+                key = p.stem  # es. "radostin_it"
+                self._profiles[key] = np.load(str(p))
+            except Exception:
+                pass
+
+        if self._profiles:
+            names = list(self._profiles.keys())
+            print(f"👤 Speaker: ✅ {len(names)} profilo/i — {', '.join(names)}")
+        else:
+            print("👤 Speaker: ⚠️  nessun profilo (usa /aggiungi voce)")
 
     @property
-    def has_profile(self): return self._profile is not None
+    def has_profile(self) -> bool:
+        """True se esiste almeno un profilo per la lingua corrente."""
+        return any(k.endswith(f"_{self.current_lang}") for k in self._profiles)
 
-    def create_profile(self, audio):
-        if not self._encoder: return False
-        try:
-            wav=preprocess_wav(audio,source_sr=SAMPLE_RATE)
-            self._profile=self._encoder.embed_utterance(wav)
-            self._path.parent.mkdir(parents=True,exist_ok=True)
-            np.save(str(self._path),self._profile)
-            print("✅ Profilo vocale salvato!"); return True
-        except Exception as e: print(f"❌ Profilo: {e}"); return False
+    def list_profiles(self) -> list:
+        """Ritorna lista di (nome, lang) per tutti i profili."""
+        result = []
+        for key in self._profiles:
+            parts = key.rsplit("_", 1)
+            if len(parts) == 2:
+                result.append((parts[0], parts[1]))
+        return result
 
-    def verify(self, audio):
-        if not self._encoder or self._profile is None: return True, 1.0
+    def _cosine(self, a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+    def add_profile(self, audio: np.ndarray, name: str, lang: str) -> bool:
+        """Crea e salva un nuovo profilo per nome+lingua."""
+        if not self._encoder:
+            print("❌ resemblyzer non disponibile"); return False
         try:
-            wav=preprocess_wav(audio,source_sr=SAMPLE_RATE)
-            emb=self._encoder.embed_utterance(wav)
-            sim=float(np.dot(self._profile,emb)/(np.linalg.norm(self._profile)*np.linalg.norm(emb)+1e-9))
-            return sim>=self._threshold, sim
-        except: return True, 1.0
+            wav = preprocess_wav(audio, source_sr=SAMPLE_RATE)
+            emb = self._encoder.embed_utterance(wav)
+            self._dir.mkdir(parents=True, exist_ok=True)
+            path = self._profile_path(name, lang)
+            np.save(str(path), emb)
+            key = self._profile_key(name, lang)
+            self._profiles[key] = emb
+            print(f"✅ Profilo salvato: {key}")
+            return True
+        except Exception as e:
+            print(f"❌ Profilo: {e}"); return False
+
+    def identify(self, audio: np.ndarray) -> tuple:
+        """
+        Identifica chi parla confrontando con tutti i profili della lingua corrente.
+        Ritorna (nome, score) del match migliore, o (None, 0.0) se nessuno supera threshold.
+        Se non ci sono profili per la lingua corrente, prova tutte le lingue.
+        """
+        if not self._encoder or not self._profiles:
+            return "owner", 1.0
+
+        try:
+            wav = preprocess_wav(audio, source_sr=SAMPLE_RATE)
+            emb = self._encoder.embed_utterance(wav)
+
+            # Prima cerca profili nella lingua corrente
+            candidates = {k: v for k, v in self._profiles.items()
+                         if k.endswith(f"_{self.current_lang}")}
+
+            # Fallback: usa tutti i profili se nessuno per la lingua corrente
+            if not candidates:
+                candidates = self._profiles
+
+            best_name, best_score = None, 0.0
+            for key, profile_emb in candidates.items():
+                score = self._cosine(profile_emb, emb)
+                if score > best_score:
+                    best_score = score
+                    best_name = key.rsplit("_", 1)[0]  # rimuove _lang
+
+            if best_score >= self._threshold:
+                return best_name, best_score
+            return None, best_score
+
+        except Exception:
+            return "owner", 1.0
+
+    def verify(self, audio: np.ndarray) -> tuple:
+        """
+        Verifica se chi parla è uno degli utenti registrati.
+        Ritorna (True/False, score).
+        """
+        name, score = self.identify(audio)
+        return name is not None, score
+
+    # Compatibilità con il vecchio API
+    def create_profile(self, audio, name="owner", lang=None) -> bool:
+        return self.add_profile(audio, name, lang or self.current_lang)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VOICE INPUT — STT (uguale a jarvis_v6)
@@ -508,6 +618,8 @@ class VoiceModule:
         self._session_t=0.0; self._stop=threading.Event()
         self._voice=VoiceInput(mic)
         self._speaker=SpeakerVerifier()
+        self._speaker.current_lang=lang  # sincronizza lingua iniziale
+        self._last_speaker=None  # nome dell'ultimo speaker identificato
         pa_name=mic.get('pa_name')
         self._tts=TTSEngine(lang=lang,mem_dir=mem_dir,pa_name=pa_name)
         # Collega riferimenti per speaker verify e TTS wait in VoiceInput.listen()
@@ -519,13 +631,55 @@ class VoiceModule:
     @property
     def tts_speaking(self): return self._tts.is_speaking
 
+    def set_lang(self, lang: str):
+        """Aggiorna la lingua corrente — sincronizza anche il verifier."""
+        self.lang = lang
+        self._speaker.current_lang = lang
+
     def setup_speaker(self):
-        if not RESEMBLYZER_OK: print("❌ pip install resemblyzer"); return
-        print("\n🎙️  Parla per 10 secondi per il profilo vocale...")
-        audio=self._voice._record_sd(timeout=10.0,silence_sec=10.0)
-        if audio is not None and len(audio)>SAMPLE_RATE*2:
-            self._speaker.create_profile(audio)
-        else: print("❌ Registrazione troppo corta")
+        """Setup legacy — crea profilo 'owner' nella lingua corrente."""
+        self.add_voice_profile(name="owner")
+
+    def add_voice_profile(self, name: str = None, lang: str = None) -> bool:
+        """
+        Registra un nuovo profilo vocale per nome+lingua.
+        Se name è None, chiede interattivamente.
+        Usato da /aggiungi voce in jarvis_v6.py.
+        """
+        if not RESEMBLYZER_OK:
+            print("❌ pip install resemblyzer"); return False
+
+        lang = lang or self.lang
+
+        if name is None:
+            name = input("   Nome utente (es. radostin): ").strip().lower()
+            if not name:
+                print("❌ Nome non valido"); return False
+
+        print(f"\n🎙️  Registrazione profilo '{name}' in lingua '{lang}'")
+        print("   Parla normalmente per 8-10 secondi...")
+        print("   (usa la stessa lingua che userai con JARVIS)\n")
+
+        audio = self._voice._record_sd(timeout=12.0, silence_sec=10.0)
+        if audio is None or len(audio) < SAMPLE_RATE * 2:
+            print("❌ Registrazione troppo corta — riprova"); return False
+
+        ok = self._speaker.add_profile(audio, name, lang)
+        if ok:
+            profiles = self._speaker.list_profiles()
+            print(f"   Profili attivi: {', '.join(f'{n}_{l}' for n,l in profiles)}")
+        return ok
+
+    def list_voice_profiles(self) -> str:
+        """Ritorna stringa con tutti i profili registrati."""
+        profiles = self._speaker.list_profiles()
+        if not profiles:
+            return "⚠️  Nessun profilo vocale registrato"
+        lines = ["👤 Profili vocali registrati:"]
+        for name, lang in sorted(profiles):
+            marker = " ◀ attivo" if lang == self.lang else ""
+            lines.append(f"   • {name} [{lang}]{marker}")
+        return "\n".join(lines)
 
     def listen(self):
         if not self._voice._wait_whisper(timeout=60):
@@ -552,8 +706,12 @@ class VoiceModule:
         print("🎙️  Parla...",flush=True)
         audio=self._voice._record_sd(timeout=15.0,silence_sec=1.5)
         if audio is None: self._sleeping=True; self._session=False; return None
-        ok,score=self._speaker.verify(audio)
-        if not ok: print(f"🔒 ({score:.2f})",flush=True); return None
+        # Identifica chi parla (non solo verifica)
+        speaker_name, score = self._speaker.identify(audio)
+        if speaker_name is None:
+            print(f"🔒 Voce non riconosciuta ({score:.2f})",flush=True); return None
+        self._last_speaker = speaker_name
+        print(f"👤 {speaker_name} ({score:.2f})",flush=True)
         text=self._voice._transcribe(audio)
         if not text: return None
         print(f"📝 '{text}'",flush=True)
@@ -566,9 +724,11 @@ class VoiceModule:
     def stop(self): self._stop.set(); self._voice.stop(); self._tts.shutdown()
 
     def status(self):
+        profiles = self._speaker.list_profiles()
+        prof_str = ', '.join(f'{n}_{l}' for n,l in profiles) if profiles else '⚠️  nessuno'
         return (f"🎙️  Voice Module:\n"
                 f"   Whisper:  {'✅' if self._voice._model else '⏳ caricando...'}\n"
-                f"   Speaker:  {'✅' if self._speaker.has_profile else '⚠️  nessun profilo'}\n"
+                f"   Profili:  {prof_str}\n"
                 f"   TTS:      {'✅' if self._tts._player else '❌'}\n"
                 f"   Lingua:   {self.lang}\n"
                 f"   Stato:    {'💤 sleep' if self._sleeping else '👂 attivo'}")
