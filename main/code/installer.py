@@ -317,6 +317,9 @@ PIP_PACKAGES = {
         "numpy>=1.24.0",
         "scipy>=1.11.0",
         "noisereduce>=3.0.0",
+        "cryptography>=42.0.0",
+        "chromadb>=0.5.0",
+        "sentence-transformers>=3.0.0",
     ],
     "STT": [
         "faster-whisper>=1.0.0",
@@ -444,6 +447,8 @@ def move_and_patch_files():
         "language_module.py",
         "agent_module.py",
         "jarvis_banner.py",
+        "jarvis_memory_engine.py",
+        "jarvis_secrets.py",
     ]
 
     for fname in files:
@@ -460,7 +465,8 @@ def move_and_patch_files():
     if not modelfile.exists():
         modelfile = src_dir / "Modelfile"
     if modelfile.exists():
-        shutil.copy2(modelfile, DEST_DIR / "Modelfile")
+        if modelfile.resolve() != (DEST_DIR / "Modelfile").resolve():
+            shutil.copy2(modelfile, DEST_DIR / "Modelfile")
         ok("Copiato: Modelfile")
 
     # Applica patch OS-specific
