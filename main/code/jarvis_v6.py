@@ -830,6 +830,14 @@ class Jarvis:
         self.disc_on    = enable_discord and DISCORD_OK and bool(DISCORD_TOKEN)
         self.mem_dir    = Path(memory_dir).expanduser().resolve()
         self.mem_dir.mkdir(exist_ok=True)
+        # ── Log conversazioni ─────────────────────────────────────────────────
+        self.log_dir    = self.mem_dir / "logs"
+        self.log_dir.mkdir(exist_ok=True)
+        _session_ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._log_file  = self.log_dir / f"session_{_session_ts}.log"
+        self._log_json  = self.log_dir / f"session_{_session_ts}.json"
+        self._cmd_log_buf: list[dict] = []
+        # ─────────────────────────────────────────────────────────────────────
         self.cwd        = Path.home()
         os.chdir(self.cwd)
         self.permanent  = self._load_json(self.mem_dir / "permanent.json")
@@ -945,7 +953,16 @@ class Jarvis:
             if facts:
                 mem = " | Memoria: " + " ; ".join(facts)
 
-        # Usa istruzione lingua dal language module se disponibile
+        # Ultimi comandi dalla log (accessibile a JARVIS)
+        cmd_log_ctx = ""
+        if self._cmd_log_buf:
+            recent = self._cmd_log_buf[-8:]   # ultimi 8 comandi
+            lines  = []
+            for e in recent:
+                mark = "OK" if e["status"] == "ok" else "ERR"
+                lines.append(f"  [{e['ts'][11:16]}][{mark}] {e['cmd'][:80]}")
+            cmd_log_ctx = " | Log comandi recenti:\n" + "\n".join(lines)
+
         if self._lang:
             lang_instruction = self._lang.system_instruction
         else:
@@ -966,6 +983,7 @@ class Jarvis:
             f"Downloads={self._xdg('downloads')} | "
             f"Documents={self._xdg('documents')}"
             f"{mem}"
+            f"{cmd_log_ctx}"
         )
 
     # ── Tool definition ───────────────────────────────────────────────────────
@@ -1478,19 +1496,55 @@ class Jarvis:
             rc, out = run_cmd(cmd, str(self.cwd))
 
         self._executed_cmds.add(cmd)
-        # run_cmd/run_sudo_cmd hanno già stampato tutto a schermo
-        # out = "✅ Completato" se ok, oppure righe di errore filtrate se ko
         if rc == 0:
-            # Stampa solo se non è già stato stampato da run_cmd
             if out and out != "✅ Completato":
-                pass  # output informativo già stampato
+                pass
             else:
                 print("✅ Completato")
+            self._log_cmd(cmd, explanation, "ok", out or "✅ Completato")
             return {"status": "ok", "output": out or "✅ Completato"}
         else:
             if not out:
                 print(f"❌ Errore (rc={rc})")
+            self._log_cmd(cmd, explanation, f"error rc={rc}", out or f"❌ Errore rc={rc}")
             return {"status": "error", "output": out or f"❌ Errore rc={rc}"}
+
+    def _log_cmd(self, cmd: str, explanation: str, status: str, output: str):
+        """
+        Scrive ogni comando eseguito nella log su file.
+        Formato testo leggibile + JSON per accesso da JARVIS.
+        """
+        import json as _json
+        ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = {
+            "ts":          ts,
+            "cmd":         cmd,
+            "explanation": explanation or "",
+            "status":      status,
+            "output":      (output or "")[:500],   # tronca output lunghi
+        }
+        # ── Testo leggibile ───────────────────────────────────────────────────
+        ok_mark = "OK " if status == "ok" else "ERR"
+        line = f"[{ts}] [{ok_mark}] {cmd}"
+        if explanation:
+            line += f"\n           # {explanation}"
+        if status != "ok":
+            line += f"\n           ! {(output or '').splitlines()[0][:120]}"
+        line += "\n"
+        try:
+            with open(self._log_file, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+        # ── JSON (per lettura da JARVIS) ──────────────────────────────────────
+        self._cmd_log_buf.append(entry)
+        if len(self._cmd_log_buf) > 500:
+            del self._cmd_log_buf[:100]
+        try:
+            with open(self._log_json, "w", encoding="utf-8") as f:
+                _json.dump(self._cmd_log_buf, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _is_ghost(self, message, history):
         msg_n = message.strip().lower()
@@ -1834,6 +1888,8 @@ class Jarvis:
                     f"📂 Dir: {self.cwd} | 🤖 {self.model} | 💾 {len(self.permanent)} | "
                     f"🧵 {_CPU_THREADS} thread CPU"
                 )
+            if cmd_part in ('/log', '/logs', '/cronologia'):
+                return "__CMD_LOG__"
             if cmd_part in ('/tts',):
                 self.tts_on = not self.tts_on
                 return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
@@ -1920,6 +1976,17 @@ class Jarvis:
                         f"📂 Dir: {self.cwd} | 🤖 {self.model} | 💾 {len(self.permanent)} | "
                         f"🧵 {_CPU_THREADS} thread CPU"
                     )
+                if result == "__CMD_LOG__":
+                    if not self._cmd_log_buf:
+                        return "  Nessun comando eseguito in questa sessione."
+                    lines = ["  Log comandi sessione corrente:\n"]
+                    for e in self._cmd_log_buf:
+                        mark = "OK " if e["status"] == "ok" else "ERR"
+                        lines.append(f"  [{e['ts']}] [{mark}] {e['cmd']}")
+                        if e["status"] != "ok":
+                            lines.append(f"           ! {e['output'].splitlines()[0][:100]}")
+                    lines.append(f"\n  Log completa: {self._log_file}")
+                    return "\n".join(lines)
                 if result == "__TTS__":
                     self.tts_on = not self.tts_on
                     return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
