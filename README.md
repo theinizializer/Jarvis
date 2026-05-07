@@ -117,20 +117,23 @@ All commands use `/` — works in both keyboard and voice mode.
 | `/remember <fact>` | Save to persistent memory |
 | `/memory` | Show everything remembered |
 | `/forget all` | Clear all memory |
-| `/language` | Current language |
+| `/language` | Show current language |
 | `/change language` | Switch language |
-| `/add language` | Add a language |
-| `/search <query>` | Explicit web search |
+| `/add language` | Add a new language |
 | `/weather <city>` | Weather forecast |
 | `/news` | Latest news |
 | `/wiki <topic>` | Wikipedia search |
 | `/tts` | Toggle voice on/off |
 | `/mode` | Switch keyboard ↔ microphone |
+| `/agent <goal>` | Autonomous agent mode |
+| `/add_voice` | Record voice profile (8-10 seconds) |
+| `/voice_profiles` | Manage voice profiles |
 | `/stats` | Session statistics |
-| `/help` | Show all commands |
+| `/log` | Show command history |
+| `/help` | Show all available commands |
 | `/exit` | Close JARVIS |
 
-> Commands are **fully localized** — in French use `/changer langue`, in German `/sprache wechseln`, etc.
+> **Note**: Commands are **fully localized** in all 16 languages — just use the English version or your language equivalent!
 
 ---
 
