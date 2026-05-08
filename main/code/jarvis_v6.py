@@ -78,6 +78,17 @@ except ImportError:
     SEARCH_OK = False
     print("⚠️  search_module.py non trovato — ricerche disabilitate")
 
+try:
+    from ssh_module import SSHManager, PARAMIKO_OK
+    SSH_OK = True
+except ImportError:
+    SSH_OK = False
+    PARAMIKO_OK = False
+    class SSHManager:
+        def __init__(self, *a, **k): pass
+        def system_context(self): return ""
+        def run_remote(self, *a, **k): return -1, "ssh_module.py non trovato"
+
 
 # ─── Voce / STT ──────────────────────────────────────────────────────────────
 def _ensure_pkg(pip_name: str, import_name: str | None = None) -> bool:
@@ -853,6 +864,8 @@ class Jarvis:
         self._executed_cmds: set[str] = set()
         self._search_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="search")
         self.search = None
+        # ── SSH Manager ───────────────────────────────────────────────────────
+        self.ssh = SSHManager(config_path=str(self.mem_dir / "ssh_hosts.json"))
         if enable_search and SEARCH_OK:
             try:
                 self.search = SearchModule(
@@ -956,12 +969,17 @@ class Jarvis:
         # Ultimi comandi dalla log (accessibile a JARVIS)
         cmd_log_ctx = ""
         if self._cmd_log_buf:
-            recent = self._cmd_log_buf[-8:]   # ultimi 8 comandi
+            recent = self._cmd_log_buf[-8:]
             lines  = []
             for e in recent:
                 mark = "OK" if e["status"] == "ok" else "ERR"
-                lines.append(f"  [{e['ts'][11:16]}][{mark}] {e['cmd'][:80]}")
+                lines.append(f"  [{e['ts'][11:16]}][{mark}][{e.get('target','locale')}] {e['cmd'][:80]}")
             cmd_log_ctx = " | Log comandi recenti:\n" + "\n".join(lines)
+
+        # Contesto host SSH remoti
+        ssh_ctx = self.ssh.system_context() if hasattr(self, 'ssh') else ""
+        if ssh_ctx:
+            ssh_ctx = "\n\n" + ssh_ctx
 
         if self._lang:
             lang_instruction = self._lang.system_instruction
@@ -984,6 +1002,7 @@ class Jarvis:
             f"Documents={self._xdg('documents')}"
             f"{mem}"
             f"{cmd_log_ctx}"
+            f"{ssh_ctx}"
         )
 
     # ── Tool definition ───────────────────────────────────────────────────────
@@ -1221,13 +1240,19 @@ class Jarvis:
         for m in _RE_INLINE_FN.finditer(text):
             cmd, expl = m.group(1).strip(), m.group(2).strip()
             if cmd and cmd not in seen:
-                seen.add(cmd); found.append({'command': cmd, 'explanation': expl})
+                seen.add(cmd)
+                found.append({'command': cmd, 'explanation': expl, 'target': 'locale'})
         for m in _RE_JSON_FULL.finditer(text):
             try:
                 p   = json.loads(m.group(1))
                 cmd = p.get('command', '').strip()
                 if cmd and cmd not in seen:
-                    seen.add(cmd); found.append({'command': cmd, 'explanation': p.get('explanation', '')})
+                    seen.add(cmd)
+                    found.append({
+                        'command':     cmd,
+                        'explanation': p.get('explanation', ''),
+                        'target':      p.get('target', 'locale'),
+                    })
             except Exception:
                 pass
         for m in _RE_JSON_CMD.finditer(text):
@@ -1235,14 +1260,16 @@ class Jarvis:
                 cmd  = m.group(1).replace('\\"', '"').replace("\\'", "'").strip()
                 expl = m.group(2).replace('\\"', '"').strip()
                 if cmd and cmd not in seen and 'execute_terminal' not in cmd:
-                    seen.add(cmd); found.append({'command': cmd, 'explanation': expl})
+                    seen.add(cmd)
+                    found.append({'command': cmd, 'explanation': expl, 'target': 'locale'})
             except Exception:
                 pass
         for m in _RE_BASH_BLK.finditer(text):
             for line in m.group(1).strip().splitlines():
                 line = line.strip()
                 if line and not line.startswith('#') and line not in seen:
-                    seen.add(line); found.append({'command': line, 'explanation': 'blocco bash'})
+                    seen.add(line)
+                    found.append({'command': line, 'explanation': 'blocco bash', 'target': 'locale'})
         return found
 
     def _parse_inline_searches(self, text) -> list[dict]:
@@ -1282,7 +1309,7 @@ class Jarvis:
             if item.get('type') == 'search':
                 result = self._execute_search(item['command'], item['explanation'])
             else:
-                result = self._execute(item['command'], item['explanation'], history=history)
+                result = self._execute(item['command'], item['explanation'], history=history, target=item.get('target','locale'))
             out    = result.get("output", "")
             status = result.get("status", "")
             results_summary.append(f"CMD: {item['command']}\nRISULTATO: {out}")
@@ -1332,7 +1359,7 @@ class Jarvis:
                 self._executed_cmds.clear()
                 print(f"\n{sep}\n⚙️ Correzione: {len(new_pending)} comando/i\n{sep}")
                 for item in new_pending:
-                    r2 = self._execute(item['command'], item['explanation'], history=history)
+                    r2 = self._execute(item['command'], item['explanation'], history=history, target=item.get('target','locale'))
                     all_results.append({
                         "cmd":    item['command'],
                         "output": r2.get("output", ""),
@@ -1386,9 +1413,23 @@ class Jarvis:
             print(f"  ❌ {m_err} {e}")
             return {"status": "error", "output": f"{m_err} {e}"}
 
-    def _execute(self, command, explanation, history=None):
+    def _execute(self, command, explanation, history=None, target: str = "locale"):
         cmd  = command.strip()
         hist = history if history is not None else self._history
+
+        # ── Smistamento locale / remoto ───────────────────────────────────────
+        is_remote = (
+            target and
+            target != "locale" and
+            target != "local" and
+            hasattr(self, 'ssh') and
+            self.ssh.is_connected() and
+            self.ssh.active_host and
+            self.ssh.active_host.name == target
+        )
+        if is_remote:
+            return self._execute_remote(cmd, explanation, target)
+        # ─────────────────────────────────────────────────────────────────────
 
         _DEDUP_EXEMPT = ('echo ', 'ls', 'date', 'free', 'df', 'ps', 'uptime')
         if not any(cmd.startswith(e) for e in _DEDUP_EXEMPT):
@@ -1509,7 +1550,28 @@ class Jarvis:
             self._log_cmd(cmd, explanation, f"error rc={rc}", out or f"❌ Errore rc={rc}")
             return {"status": "error", "output": out or f"❌ Errore rc={rc}"}
 
-    def _log_cmd(self, cmd: str, explanation: str, status: str, output: str):
+    def _execute_remote(self, cmd: str, explanation: str, target: str) -> dict:
+        """Esegue un comando sull'host SSH remoto e mostra l'output."""
+        host = self.ssh.active_host
+        host_label = f"[{GOLD}{target}{RST}]" if target else "[remoto]"
+        print(f"\n▶ {host_label} {cmd}")
+        if explanation:
+            print(f"  💡 {explanation}")
+
+        self._stats["cmds"] += 1
+        rc, out = self.ssh.run_remote(cmd, timeout=60)
+
+        if out:
+            print(out)
+
+        if rc == 0:
+            self._log_cmd(cmd, explanation, "ok", out or "✅ Completato", target=target)
+            return {"status": "ok", "output": out or "✅ Completato"}
+        else:
+            self._log_cmd(cmd, explanation, f"error rc={rc}", out or f"❌ Errore rc={rc}", target=target)
+            return {"status": "error", "output": out or f"❌ Errore rc={rc}"}
+
+    def _log_cmd(self, cmd: str, explanation: str, status: str, output: str, target: str = "locale"):
         """
         Scrive ogni comando eseguito nella log su file.
         Formato testo leggibile + JSON per accesso da JARVIS.
@@ -1521,11 +1583,13 @@ class Jarvis:
             "cmd":         cmd,
             "explanation": explanation or "",
             "status":      status,
-            "output":      (output or "")[:500],   # tronca output lunghi
+            "output":      (output or "")[:500],
+            "target":      target,
         }
         # ── Testo leggibile ───────────────────────────────────────────────────
         ok_mark = "OK " if status == "ok" else "ERR"
-        line = f"[{ts}] [{ok_mark}] {cmd}"
+        tgt_tag = f"[{target}] " if target != "locale" else ""
+        line = f"[{ts}] [{ok_mark}] {tgt_tag}{cmd}"
         if explanation:
             line += f"\n           # {explanation}"
         if status != "ok":
@@ -1890,6 +1954,8 @@ class Jarvis:
                 )
             if cmd_part in ('/log', '/logs', '/cronologia'):
                 return "__CMD_LOG__"
+            if cmd_part in ('/host', '/hosts', '/ssh', '/remoto', '/remote'):
+                return "__HOST__" + (f":{rest.strip()}" if rest.strip() else "")
             if cmd_part in ('/tts',):
                 self.tts_on = not self.tts_on
                 return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
@@ -1982,11 +2048,16 @@ class Jarvis:
                     lines = ["  Log comandi sessione corrente:\n"]
                     for e in self._cmd_log_buf:
                         mark = "OK " if e["status"] == "ok" else "ERR"
-                        lines.append(f"  [{e['ts']}] [{mark}] {e['cmd']}")
+                        tgt  = f"[{e.get('target','locale')}] " if e.get('target','locale') != 'locale' else ""
+                        lines.append(f"  [{e['ts']}] [{mark}] {tgt}{e['cmd']}")
                         if e["status"] != "ok":
                             lines.append(f"           ! {e['output'].splitlines()[0][:100]}")
                     lines.append(f"\n  Log completa: {self._log_file}")
                     return "\n".join(lines)
+                if result and result.startswith("__HOST__"):
+                    sub = result[len("__HOST__"):]
+                    arg = sub.lstrip(":").strip().lower() if sub.startswith(":") else ""
+                    return "__HOST_HANDLED__"   # gestito sotto nel main loop
                 if result == "__TTS__":
                     self.tts_on = not self.tts_on
                     return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
@@ -3029,6 +3100,42 @@ def main():
 
                     else:
                         print("  Scelta non valida.")
+
+            elif result and result.startswith("__HOST__"):
+                # ── Gestione /host ────────────────────────────────────────────
+                arg = result[len("__HOST__"):].lstrip(":").strip().lower()
+
+                if not arg or arg == "list" or arg == "lista":
+                    print(bot.ssh.cmd_list())
+
+                elif arg == "add" or arg == "aggiungi":
+                    bot.ssh.cmd_add_interactive()
+
+                elif arg == "remove" or arg == "rimuovi" or arg == "elimina":
+                    print(bot.ssh.cmd_remove_interactive())
+
+                elif arg == "disconnect" or arg == "disconnetti":
+                    if bot.ssh.is_connected():
+                        name = bot.ssh.active_host.name if bot.ssh.active_host else "?"
+                        bot.ssh.disconnect()
+                        print(f"\n  Disconnesso da '{name}'.")
+                    else:
+                        print("\n  Nessun host connesso.")
+
+                else:
+                    # Prova a connettersi all'host con quel nome
+                    print(f"\n  Connessione a '{arg}'...")
+                    ok, msg = bot.ssh.connect(arg)
+                    if ok:
+                        ah = bot.ssh.active_host
+                        print(f"  {msg}")
+                        print(f"  OS: {ah.os_type}  |  {ah.hw_info.get('os','?')}")
+                        print(f"  CPU: {ah.hw_info.get('cpu','?')}")
+                        print(f"  RAM: {ah.hw_info.get('ram','?')}")
+                        print(f"  Dir: {ah.cwd}")
+                    else:
+                        print(f"  {msg}")
+                print()
 
             else:
                 if result:
