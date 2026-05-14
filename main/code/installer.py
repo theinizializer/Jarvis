@@ -200,23 +200,57 @@ def install_system_packages():
     step(3, 8, "Dipendenze sistema")
 
     if IS_LINUX:
-        _install_apt()
+        _install_linux()
     elif IS_MAC:
         _install_brew()
     elif IS_WINDOWS:
         _install_winget()
 
-def _install_apt():
-    if not cmd_exists("apt"):
-        warn("apt non trovato — salta")
+def _install_linux():
+    """Installa pacchetti di sistema su qualsiasi distro Linux."""
+
+    # Mappa package-manager → (cmd_update, cmd_install, pacchetti_necessari)
+    # Ordine: verifica prima pacman (Arch/CachyOS/Manjaro), poi apt, poi dnf, poi zypper
+    PM_CONFIGS = [
+        # (binary_pm, update_cmd, install_cmd, pkgs_audio, pkgs_portaudio, pkgs_pulse)
+        ("pacman",  ["sudo", "pacman", "-Sy", "--noconfirm"],
+                    ["sudo", "pacman", "-S", "--noconfirm", "--needed"],
+                    "mpg123", "portaudio", "pipewire-pulse"),
+        ("apt",     ["sudo", "apt", "update", "-qq"],
+                    ["sudo", "apt", "install", "-y"],
+                    "mpg123", "portaudio19-dev", "pulseaudio-utils"),
+        ("dnf",     ["sudo", "dnf", "check-update"],
+                    ["sudo", "dnf", "install", "-y"],
+                    "mpg123", "portaudio-devel", "pulseaudio-utils"),
+        ("zypper",  ["sudo", "zypper", "refresh"],
+                    ["sudo", "zypper", "install", "-y"],
+                    "mpg123", "portaudio-devel", "pulseaudio-utils"),
+    ]
+
+    pm_found = None
+    for entry in PM_CONFIGS:
+        if cmd_exists(entry[0]):
+            pm_found = entry
+            break
+
+    if pm_found is None:
+        warn("Nessun package manager riconosciuto (apt/pacman/dnf/zypper) — salta")
+        warn("Installa manualmente: mpg123, portaudio, pulseaudio-utils (o equivalenti)")
         return
 
-    pkgs = []
+    pm_bin, update_cmd, install_cmd, pkg_mpg, pkg_portaudio, pkg_pulse = pm_found
+    info(f"Package manager rilevato: {pm_bin}")
+
+    # Binary → pacchetto corrispondente per questa distro
+    # Nota: 'parecord' non esiste su Arch — usiamo 'pw-record' (PipeWire) o 'arecord' come proxy
+    pulse_binary = "parecord" if pm_bin != "pacman" else "pw-record"
     checks = [
-        ("mpg123",    "mpg123",           "riproduzione audio TTS"),
-        ("parecord",  "pulseaudio-utils",  "registrazione microfono"),
-        ("portaudio19-dev", "portaudio19-dev", "sounddevice (Python audio)"),
+        ("mpg123",       pkg_mpg,       "riproduzione audio TTS"),
+        (pulse_binary,   pkg_pulse,     "registrazione microfono"),
+        # portaudio è una libreria, non un binary — verifichiamo con pkg-config
     ]
+
+    pkgs = []
     for binary, pkg, desc in checks:
         if cmd_exists(binary):
             ok(f"{pkg}: già presente ({desc})")
@@ -224,14 +258,24 @@ def _install_apt():
             warn(f"{pkg}: mancante ({desc})")
             pkgs.append(pkg)
 
+    # Controlla portaudio via pkg-config (è una lib, non un eseguibile)
+    portaudio_ok = run(["pkg-config", "--exists", "portaudio-2.0"],
+                       check=False, capture=True).returncode == 0
+    if portaudio_ok:
+        ok(f"{pkg_portaudio}: già presente (sounddevice)")
+    else:
+        warn(f"{pkg_portaudio}: mancante (sounddevice)")
+        pkgs.append(pkg_portaudio)
+
     if pkgs:
-        info(f"Installo: {', '.join(pkgs)}")
+        info(f"Installo con {pm_bin}: {', '.join(pkgs)}")
         try:
-            run(["sudo", "apt", "update", "-qq"])
-            run(["sudo", "apt", "install", "-y"] + pkgs)
-            ok("Pacchetti apt installati")
+            run(update_cmd, check=False)
+            run(install_cmd + pkgs)
+            ok(f"Pacchetti installati con {pm_bin}")
         except Exception as e:
-            warn(f"apt fallito: {e} — installa manualmente: sudo apt install {' '.join(pkgs)}")
+            warn(f"{pm_bin} fallito: {e}")
+            warn(f"Installa manualmente: {' '.join(pkgs)}")
 
 def _install_brew():
     # Installa Homebrew se mancante
@@ -304,7 +348,14 @@ def create_venv():
         ok(f"Venv creato: {VENV_DIR}")
     except Exception as e:
         err(f"Creazione venv fallita: {e}")
-        info("Prova: sudo apt install python3-venv")
+        if cmd_exists("apt"):
+            info("Prova: sudo apt install python3-venv")
+        elif cmd_exists("pacman"):
+            info("Prova: sudo pacman -S python (già incluso su Arch)")
+        elif cmd_exists("dnf"):
+            info("Prova: sudo dnf install python3")
+        else:
+            info("Assicurati che python3-venv sia installato per la tua distro")
         sys.exit(1)
 
 # ══════════════════════════════════════════════════════════════════════════════
