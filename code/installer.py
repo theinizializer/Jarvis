@@ -9,6 +9,8 @@ Logica:
   - Linux:   apt + venv jarvisenv in ~
   - macOS:   Homebrew + nessun venv (Python sistema)
   - Windows: winget + nessun venv (Python sistema)
+  - Cerca i file in ../code (JARVIS_MAIN/code)
+  - Cerca il Modelfile in .. (JARVIS_MAIN/Modelfile)
   - Sposta i file in ~/Documenti/modelli (o equivalente per OS)
   - Applica patch OS-specific al codice (player audio, mute mic)
   - Configura .env con API key
@@ -18,9 +20,9 @@ Logica:
 import os, sys, json, shutil, subprocess, platform, tempfile, urllib.request
 from pathlib import Path
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # RILEVAMENTO OS
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 OS = platform.system()          # "Linux" | "Darwin" | "Windows"
 IS_LINUX   = OS == "Linux"
@@ -47,9 +49,18 @@ DEST_DIR  = _find_documents() / "modelli"
 VENV_DIR  = Path.home() / "jarvisenv"   # solo Linux
 ENV_FILE  = DEST_DIR / ".env"
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Percorsi sorgente (relative al repository) ─────────────────────────────────
+# L'installer si trova in: jarvis-main/code/installer.py
+# Quindi:
+#   - code/ si trova a: ./
+#   - Modelfile si trova a: ../
+REPO_ROOT = Path(__file__).parent.parent
+CODE_DIR  = REPO_ROOT / "code"
+MODELFILE_PATH = REPO_ROOT / "Modelfile"
+
+# ════════════════════════════════════════════════════════════════════════════
 # COLORI
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 class C:
     GREEN  = "\033[92m"
@@ -77,9 +88,9 @@ def ask(prompt, default="") -> str:
 def confirm(prompt) -> bool:
     return ask(prompt + " (S/n):").lower() in ("", "s", "y", "si", "sì", "yes")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # UTILITÀ
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def run(cmd, check=True, capture=False, input_text=None, shell=False):
     kwargs = dict(check=check, shell=shell)
@@ -108,9 +119,9 @@ def python_cmd() -> list:
         return [str(VENV_DIR / "bin" / "python")]
     return [sys.executable]
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 1 — Controllo sistema
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def check_system():
     step(1, 8, "Controllo sistema")
@@ -122,10 +133,11 @@ def check_system():
     ok(f"Python {v.major}.{v.minor}.{v.micro}")
     ok(f"Sistema: {OS} {platform.release()}")
     ok(f"Destinazione: {DEST_DIR}")
+    ok(f"Sorgente codice: {CODE_DIR}")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 2 — Installa Ollama (tutti gli OS)
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def install_ollama():
     step(2, 8, "Ollama")
@@ -192,9 +204,9 @@ def install_ollama():
         if not confirm("Continuare comunque?"):
             sys.exit(1)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 3 — Dipendenze sistema (apt / brew / winget)
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def install_system_packages():
     step(3, 8, "Dipendenze sistema")
@@ -323,9 +335,9 @@ def _install_winget():
         except Exception as e:
             warn(f"ffmpeg fallito: {e}")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 4 — Virtualenv (solo Linux)
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def create_venv():
     step(4, 8, "Ambiente virtuale Python")
@@ -358,9 +370,9 @@ def create_venv():
             info("Assicurati che python3-venv sia installato per la tua distro")
         sys.exit(1)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 5 — Dipendenze Python
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 PIP_PACKAGES = {
     "Core": [
@@ -420,9 +432,9 @@ def install_python_deps():
                 print(f"{C.RED}❌{C.RESET}")
                 warn(f"{name} obbligatorio — riprova manualmente: pip install {pkg}")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 6 — Sposta file + patch OS-specific
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 # Patch da applicare ai file Python in base all'OS rilevato
 # Ogni entry: (file, stringa_originale, sostituzione_linux, sostituzione_mac, sostituzione_win)
@@ -483,14 +495,19 @@ def _unmute_mic(pa_name):
         pass'''
 
 def move_and_patch_files():
-    step(6, 8, f"Copia file → {DEST_DIR}")
+    step(6, 8, f"Copia file da {CODE_DIR} → {DEST_DIR}")
 
     # Crea cartella destinazione
     DEST_DIR.mkdir(parents=True, exist_ok=True)
     ok(f"Cartella: {DEST_DIR}")
 
-    # File da copiare (sono nella stessa cartella dell'installer)
-    src_dir = Path(__file__).parent
+    # Verifica che il source directory esista
+    if not CODE_DIR.exists():
+        err(f"Cartella sorgente non trovata: {CODE_DIR}")
+        err(f"Assicurati di eseguire l'installer dalla cartella jarvis-main/code/")
+        sys.exit(1)
+
+    # File da copiare (sono nella cartella code/)
     files = [
         "jarvis_v8.py",
         "jarvis_memory_engine.py",
@@ -504,7 +521,7 @@ def move_and_patch_files():
     ]
 
     for fname in files:
-        src = src_dir / fname
+        src = CODE_DIR / fname
         dst = DEST_DIR / fname
         if src.exists():
             shutil.copy2(src, dst)
@@ -512,14 +529,13 @@ def move_and_patch_files():
         else:
             warn(f"Non trovato: {fname} — salta")
 
-    # Copia Modelfile
-    modelfile = src_dir.parent / "Modelfile"
-    if not modelfile.exists():
-        modelfile = src_dir / "Modelfile"
-    if modelfile.exists():
-        if modelfile.resolve() != (DEST_DIR / "Modelfile").resolve():
-            shutil.copy2(modelfile, DEST_DIR / "Modelfile")
+    # Copia Modelfile (si trova in REPO_ROOT, non in CODE_DIR)
+    if MODELFILE_PATH.exists():
+        if MODELFILE_PATH.resolve() != (DEST_DIR / "Modelfile").resolve():
+            shutil.copy2(MODELFILE_PATH, DEST_DIR / "Modelfile")
         ok("Copiato: Modelfile")
+    else:
+        warn(f"Modelfile non trovato in {MODELFILE_PATH}")
 
     # Applica patch OS-specific
     info(f"Applico patch per {OS}...")
@@ -558,9 +574,9 @@ def _apply_os_patches():
     with open(voice_file, "w", encoding="utf-8") as f:
         f.write(content)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 7 — .env + API key
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def setup_env():
     step(7, 8, "API Key (.env)")
@@ -644,9 +660,9 @@ def setup_env():
 
     ok(f".env salvato in {ENV_FILE}")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # STEP 8 — Script di avvio + modello Ollama
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def create_start_script():
     step(8, 8, "Script di avvio + modello Ollama")
@@ -701,7 +717,7 @@ def create_start_script():
         os.chmod(speaker, 0o755)
         ok(f"Script creato: {speaker}")
 
-    # ── Modello Ollama ─────────────────────────────────────────────────────────
+    # ── Modello Ollama ───────────────────────────────────────────────────────
     if cmd_exists("ollama"):
         modelfile = DEST_DIR / "Modelfile"
         r = run(["ollama", "list"], capture=True, check=False)
@@ -731,9 +747,9 @@ def create_start_script():
     else:
         warn("Ollama non disponibile — modello non creato")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════��═════════════════════════════════════════
 # VERIFICA FINALE
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def verify():
     print(f"\n{C.BOLD}Verifica installazione{C.RESET}")
@@ -775,9 +791,9 @@ def verify():
 
     return all_ok
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # SUMMARY
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def print_summary(success):
     print("\n" + "═" * 54)
@@ -805,9 +821,9 @@ def print_summary(success):
    {C.BLUE}docker compose up -d{C.RESET}
 """)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 def main():
     print("═" * 54)
