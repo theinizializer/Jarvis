@@ -57,7 +57,7 @@ README.md                       ← this file
 
 ```bash
 git clone https://github.com/theinizializer/Jarvis.git
-cd Jarvis/code
+cd Jarvis-main/code
 python installer.py
 ```
 
