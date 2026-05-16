@@ -1,6 +1,6 @@
-# 🤖 JARVIS v6.0
+# 🤖 JARVIS v8.0
 
-> Local personal AI assistant — voice, web search, Discord, persistent memory.  
+> Local personal AI assistant — voice, web search, Discord, persistent memory with ChromaDB.  
 > Runs **completely offline** on your machine. No data sent to external servers (except optional web searches).
 
 ---
@@ -14,26 +14,33 @@
 | 😴 **Sleep Word** | "Jarvis dormi/sleep/dors" — closes session |
 | 🔒 **Speaker Verification** | JARVIS responds only to your voice |
 | 🔊 **TTS** | Text-to-speech with automatic microphone mute |
-| 🧠 **Persistent Memory** | Remembers facts between sessions |
+| 🧠 **Memory Engine** | SQLite + ChromaDB — semantic search + persistent facts |
 | 💻 **Terminal Commands** | Run shell commands with confirmation |
 | 🌍 **16 Languages** | IT, FR, EN, DE, ES, PT, ZH, JA, KO, AR, RU, NL, PL, TR, SV, LB |
-| 🔍 **Web Search** | SearXNG → Tavily → Brave → DDG → Wikipedia |
+| 🔍 **Web Search** | Tavily + Brave + SearXNG + DDG + Wikipedia |
 | 💙 **Discord Bot** | Use JARVIS directly from Discord |
-| 🥽 **AR Glasses** | Raspberry Pi 5 support with auto-discovery |
+| 🤖 **Agent Mode** | Autonomous task execution with reasoning |
+| 🖥️ **SSH Module** | Execute commands on remote servers |
 
 ---
 
 ## 📁 Project Structure
 
 ```
-jarvis_v6.py        ← main core: Ollama, memory, terminal, Discord
-voice_module.py     ← STT (Whisper), TTS (gTTS), wake word, speaker verification
-search_module.py    ← web search backends with fallback chain
-language_module.py  ← localization for 16 languages
-jarvis_rasp.py      ← Raspberry Pi version (AR glasses)
-installer.py        ← automatic setup
-Modelfile           ← Ollama model configuration
-docker-compose.yml  ← SearXNG local search engine
+code/
+  ├── jarvis_v8.py              ← main core: Ollama, memory, terminal, Discord
+  ├── jarvis_memory_engine.py   ← SQLite + ChromaDB semantic memory
+  ├── voice_module.py           ← STT (Whisper), TTS (gTTS), wake word, speaker verification
+  ├── search_module.py          ← web search backends with fallback chain
+  ├── language_module.py        ← localization for 16 languages
+  ├── agent_module.py           ← autonomous agent with reasoning
+  ├── jarvis_banner.py          ← live UI banner
+  ├── jarvis_secrets.py         ← PIN + encrypted secrets management
+  ├── ssh_module.py             ← remote SSH execution
+  ├── installer.py              ← automatic cross-platform setup
+  └── Modelfile                 ← Ollama model configuration
+docker-compose.yml             ← SearXNG local search engine
+README.md                       ← this file
 ```
 
 ---
@@ -44,34 +51,43 @@ docker-compose.yml  ← SearXNG local search engine
 
 - Python 3.10+
 - [Ollama](https://ollama.com) — local AI model
-- Linux with PulseAudio/PipeWire (macOS/Windows: partial support)
+- Linux/macOS/Windows supported
 
-```bash
-sudo apt install pulseaudio mpg123 parecord  # Ubuntu/Debian
-```
-
-### Quick Start
+### Quick Start (Automatic)
 
 ```bash
 git clone https://github.com/theinizializer/Jarvis.git
-cd Jarvis
-pip install -r requirements.txt
+cd Jarvis/code
+python installer.py
 ```
 
-### Create the Ollama model
+The installer will:
+1. ✅ Detect your OS
+2. ✅ Install Ollama automatically
+3. ✅ Install system dependencies (audio, portaudio)
+4. ✅ Create Python venv (Linux only)
+5. ✅ Install all Python packages
+6. ✅ Copy files to ~/Documents/modelli
+7. ✅ Configure .env with API keys
+8. ✅ Create startup scripts
+9. ✅ Download Ollama models
+
+### Manual Setup
 
 ```bash
+# Install Ollama from https://ollama.com
+# Pull base model
 ollama pull qwen2.5:7b
+
+# Create JARVIS model
 ollama create jarvisQwen -f Modelfile
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Start JARVIS
+python jarvis_v8.py
 ```
-
-### Start JARVIS
-
-```bash
-python jarvis_v6.py
-```
-
-On first run, JARVIS will ask you to choose a language — this is saved and never asked again.
 
 ---
 
@@ -81,8 +97,8 @@ JARVIS uses a fallback chain — configure what you have, skip the rest.
 
 | Backend | Type | Setup |
 |---------|------|-------|
-| **SearXNG** ⭐ | Self-hosted, unlimited | `docker compose up -d` |
 | **Tavily** | API, 1000 req/month free | [tavily.com](https://tavily.com) → `TAVILY_API_KEY` in `.env` |
+| **SearXNG** ⭐ | Self-hosted, unlimited | `docker compose up -d` |
 | **Brave** | API, 2000 req/month free | [brave search](https://api.search.brave.com) → `BRAVE_API_KEY` in `.env` |
 | **DuckDuckGo** | Free, no key | Automatic fallback |
 | **Wikipedia** | Free, no key | Always available |
@@ -91,6 +107,20 @@ JARVIS uses a fallback chain — configure what you have, skip the rest.
 ```bash
 # Start SearXNG locally (recommended)
 docker compose up -d
+```
+
+---
+
+## 🧠 Memory Engine (NEW in v8.0)
+
+JARVIS now has **semantic memory** powered by ChromaDB:
+
+```python
+# Automatically saved between sessions
+/memorizza Il mio nome è radostin
+/memorizza Lavoro come programmatore a Lussemburgo
+/memoria  # Shows all memories with semantic search
+/dimentica tutto  # Clear all memories
 ```
 
 ---
@@ -119,15 +149,17 @@ All commands use `/` — works in both keyboard and voice mode.
 | `/forget all` | Clear all memory |
 | `/language` | Show current language |
 | `/change language` | Switch language |
-| `/add language` | Add a new language |
 | `/weather <city>` | Weather forecast |
 | `/news` | Latest news |
 | `/wiki <topic>` | Wikipedia search |
 | `/tts` | Toggle voice on/off |
-| `/mode` | Switch keyboard ↔ microphone |
+| `/provider groq\|nvidia\|ollama` | Switch AI provider |
 | `/agent <goal>` | Autonomous agent mode |
 | `/add_voice` | Record voice profile (8-10 seconds) |
 | `/voice_profiles` | Manage voice profiles |
+| `/host list` | Show SSH hosts |
+| `/host add` | Add new SSH host |
+| `/host <name>` | Connect to SSH host |
 | `/stats` | Session statistics |
 | `/log` | Show command history |
 | `/help` | Show all available commands |
@@ -137,42 +169,57 @@ All commands use `/` — works in both keyboard and voice mode.
 
 ---
 
+## 🤖 Multiple AI Providers (NEW in v8.0)
+
+Choose your brain at runtime:
+
+```bash
+/provider groq      # Groq API (120B — fastest)
+/provider nvidia    # NVIDIA NIM (Qwen 397B — vision + reasoning)
+/provider ollama    # Local Ollama (privacy-first)
+```
+
+**Groq API** (recommended for speed):
+1. Get free API key: https://console.groq.com
+2. Set `GROQ_API_KEY` in `.env`
+3. JARVIS auto-switches if internet available
+
+**NVIDIA NIM** (recommended for vision + complex tasks):
+1. Get free API key: https://build.nvidia.com
+2. Set `NVIDIA_API_KEY` in `.env`
+3. Use for vision, debugging, code review
+
+**Local Ollama** (recommended for privacy):
+- No API keys needed
+- Runs 100% offline
+- Slower but completely private
+
+---
+
 ## 🔒 Speaker Verification (optional)
 
 JARVIS can learn your voice and ignore everyone else — including itself.
 
 ```bash
 # Set up voice profile (speak for 10 seconds)
-HIP_VISIBLE_DEVICES=-1 python voice_module.py --setup-speaker
+cd ~/Documents/modelli
+python voice_module.py --setup-speaker
 ```
 
 On AMD GPUs, always set `HIP_VISIBLE_DEVICES=-1` to force CPU mode for resemblyzer.
 
 ---
 
-## 🥽 Raspberry Pi / AR Glasses
-
-`jarvis_rasp.py` connects to your main PC over the local network — the AI model runs on the PC, commands execute on the Raspberry Pi.
-
-```bash
-# On your main PC — allow Ollama network connections
-sudo systemctl edit ollama
-# Add: Environment="OLLAMA_HOST=0.0.0.0:11434"
-sudo systemctl restart ollama
-
-# On Raspberry Pi — auto-discovers the PC
-python jarvis_rasp.py
-```
-
----
-
 ## 🔑 API Keys (.env)
 
 ```env
-DISCORD_TOKEN=...      # Discord bot (optional)
-BRAVE_API_KEY=...      # Brave Search (optional)
-GNEWS_API_KEY=...      # GNews (optional)
-TAVILY_API_KEY=...     # Tavily AI search (optional)
+GROQ_API_KEY=gsk_...           # Groq API (optional — use /provider ollama if not set)
+NVIDIA_API_KEY=nvapi-...       # NVIDIA NIM (optional — vision + reasoning)
+TAVILY_API_KEY=tvly-...        # Tavily Search (optional)
+BRAVE_API_KEY=...              # Brave Search (optional)
+GNEWS_API_KEY=...              # GNews (optional)
+DISCORD_TOKEN=...              # Discord bot (optional)
+SUDO_PASSWORD=...              # Sudo password (optional — ask on first run)
 ```
 
 ---
@@ -188,7 +235,7 @@ python3 -c "import sounddevice as sd; print(sd.query_devices(kind='input'))"
 **`HIP error` on AMD GPU**  
 resemblyzer tries to use the AMD GPU. Force CPU:
 ```bash
-HIP_VISIBLE_DEVICES=-1 python jarvis_v6.py
+HIP_VISIBLE_DEVICES=-1 python jarvis_v8.py
 ```
 
 **Whisper not transcribing / hallucinating**  
@@ -211,6 +258,16 @@ sudo apt install pulseaudio-utils
 sudo apt install mpg123
 which mpg123  # should print /usr/bin/mpg123
 ```
+
+---
+
+## 📊 Model Benchmarks
+
+| Model | Type | Speed | Accuracy | Vision | Cost |
+|-------|------|-------|----------|--------|------|
+| Groq 120B | Cloud | ⚡⚡⚡ | ⭐⭐⭐⭐ | No | Free tier |
+| NVIDIA Qwen 397B | Cloud | ⚡⚡ | ⭐⭐⭐⭐⭐ | Yes | Free tier |
+| Ollama Qwen 7B | Local | ⚡ | ⭐⭐⭐ | No | Free |
 
 ---
 
