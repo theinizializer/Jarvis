@@ -45,17 +45,21 @@ try:
     from jarvis_banner import (
         print_banner        as _print_jarvis_banner,
         init_live_banner    as _init_live_banner,
+        run_jarvis_tui      as _run_jarvis_tui,
         reprint_menu        as _reprint_menu,
         start_speaking_anim as _start_speaking_anim,
         stop_speaking_anim  as _stop_speaking_anim,
+        notify_setup_done   as _notify_setup_done,
     )
     BANNER_OK = True
 except ImportError:
     BANNER_OK = False
     def _init_live_banner(bot, lang_mgr=None): return None
+    def _run_jarvis_tui(live, worker_fn): worker_fn()
     def _reprint_menu(lang): pass
     def _start_speaking_anim(): pass
     def _stop_speaking_anim(): pass
+    def _notify_setup_done(): pass
 
 try:
     from search_module import SearchModule
@@ -162,6 +166,11 @@ GROQ_URL      = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL    = "openai/gpt-oss-120b"         # 120B — principale
 GROQ_FALLBACK = "llama-3.3-70b-versatile"     # fallback se 120B non disponibile
 GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")
+
+# ─── Cerebras (fallback Groq — veloce, 70B gratuito) ─────────────────────────
+CEREBRAS_URL     = "https://api.cerebras.ai/v1/chat/completions"
+CEREBRAS_MODEL   = "llama-3.3-70b"
+CEREBRAS_API_KEY = CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
 
 # ─── NVIDIA NIM (specialista: vision + task pesanti) ─────────────────────────
 NVIDIA_URL    = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -287,6 +296,17 @@ def _contains_wake_word(text: str) -> bool:
     return False
 
 
+try:
+    from commands_module import CommandContext, dispatch as _cmd_dispatch
+    COMMANDS_MODULE_OK = True
+except ImportError:
+    COMMANDS_MODULE_OK = False
+    _cmd_dispatch = None
+
+# ─── Coda input modale (usata da _confirm() e _ask() quando Textual è attivo)
+_modal_input_queue: "queue.Queue | None" = None
+_modal_prompt_cb:   "callable | None"    = None
+
 # ─── Stato sessione vocale ────────────────────────────────────────────────────
 class WakeWordSession:
     def __init__(self, timeout: float = WAKE_SESSION_TIMEOUT):
@@ -362,7 +382,10 @@ class CleanupManager:
         }
         print(f"\n\n🛑 Segnale ricevuto: {sig_names.get(signum, signum)}")
         self.cleanup()
-        sys.exit(0)
+        # Usa os._exit invece di sys.exit: bypassa threading._shutdown e
+        # concurrent.futures atexit, evitando il traceback durante il download
+        # di modelli HuggingFace (Whisper, resemblyzer, ecc.) in background.
+        os._exit(0)
 
     def cleanup(self):
         with self._lock:
@@ -378,13 +401,15 @@ class CleanupManager:
         for cb in self._callbacks:
             try:
                 cb()
+            except (KeyboardInterrupt, SystemExit):
+                pass   # ignora interrupt nei callback — cleanup continua
             except Exception as e:
                 print(f"   ⚠️ Callback cleanup: {e}")
 
         # Killa Ollama completamente
         self._kill_ollama()
 
-        print("✅ Cleanup completato. Ciao!")
+        print("ok Cleanup completato. Ciao!")
         print("=" * 52 + "\n")
 
     def _kill_ollama(self):
@@ -398,7 +423,7 @@ class CleanupManager:
                 capture_output=True, timeout=8
             )
             if r.returncode == 0:
-                print("   ✅ Ollama fermato via systemctl")
+                print("   ok Ollama fermato via systemctl")
                 time.sleep(1)
                 return
         except Exception:
@@ -426,7 +451,7 @@ class CleanupManager:
                 capture_output=True
             )
             if check.returncode != 0:
-                print("   ✅ Ollama terminato via pkill TERM")
+                print("   ok Ollama terminato via pkill TERM")
                 return
         except Exception:
             pass
@@ -444,7 +469,7 @@ class CleanupManager:
                         subprocess.run(["kill", "-9", pid], capture_output=True)
                     except Exception:
                         pass
-                print(f"   ✅ Ollama killato (PIDs: {', '.join(pids)})")
+                print(f"   ok Ollama killato (PIDs: {', '.join(pids)})")
             else:
                 print("   ℹ️  Ollama non era in esecuzione")
         except Exception as e:
@@ -545,7 +570,7 @@ def ensure_ollama() -> bool:
     for attempt in range(2):
         try:
             requests.get("http://localhost:11434", timeout=2)
-            print("✅ Ollama attivo")
+            print("ok Ollama attivo")
             _pin_ollama_cores()   # assicura pinning anche se già avviato
             return True
         except Exception:
@@ -557,7 +582,7 @@ def ensure_ollama() -> bool:
                        capture_output=True, timeout=10, check=False)
         time.sleep(3)
         requests.get("http://localhost:11434", timeout=2)
-        print("✅ Ollama avviato via systemctl")
+        print("ok Ollama avviato via systemctl")
         _pin_ollama_cores()
         return True
     except Exception:
@@ -575,7 +600,7 @@ def ensure_ollama() -> bool:
             print(".", end="", flush=True)
             try:
                 requests.get("http://localhost:11434", timeout=1)
-                print(f" ✅ ({i+1}s)")
+                print(f" ok ({i+1}s)")
                 return True
             except Exception:
                 pass
@@ -736,14 +761,14 @@ def run_cmd(command, cwd, timeout=60):
             model_out = filtered if filtered else out[:800]
         elif _is_informative(command):
             # Comando informativo: manda tutto al modello (è quello che ha chiesto)
-            model_out = out if out else "✅ Completato"
+            model_out = out if out else "ok Completato"
         else:
             # Comando operativo ok: filtra warning, se nessun errore conferma successo
             filtered = _extract_errors(out)
             if filtered:
                 model_out = filtered  # ci sono warning, passali
             else:
-                model_out = "✅ Completato"  # tutto ok, il modello sa che può continuare
+                model_out = "ok Completato"  # tutto ok, il modello sa che può continuare
         return r.returncode, model_out
     except subprocess.TimeoutExpired:
         return -1, f"⏱️ Timeout ({timeout}s)"
@@ -773,10 +798,10 @@ def run_sudo_cmd(command, password, cwd, timeout=120):
             filtered = _extract_errors(out)
             model_out = filtered if filtered else out[:800]
         elif _is_informative(command):
-            model_out = out if out else "✅ Completato"
+            model_out = out if out else "ok Completato"
         else:
             filtered = _extract_errors(out)
-            model_out = filtered if filtered else "✅ Completato"
+            model_out = filtered if filtered else "ok Completato"
         return proc.returncode, model_out
     except Exception as e:
         return -1, f"❌ sudo: {e}"
@@ -902,7 +927,7 @@ class Jarvis:
                 from jarvis_memory_engine import MemoryEngine
                 self._mem_engine = MemoryEngine(self.mem_dir)
                 self.permanent   = self._mem_engine
-                print(f"🧠 MemoryEngine: ✅ ({self._mem_engine.count()} fatti)")
+                print(f"🧠 MemoryEngine: ok ({self._mem_engine.count()} fatti)")
             except ImportError as e:
                 msg = f"MemoryEngine ImportError: {e}"
                 print(f"⚠️  {msg} — uso JSON")
@@ -957,27 +982,39 @@ class Jarvis:
             self._init_discord()
 
         # ── Groq: check internet e API key ────────────────────────────────────
-        self._groq_available  = False
-        self._nvidia_available = False
-        self._current_provider = "ollama"  # "groq" | "nvidia" | "ollama"
+        self._groq_available      = False
+        self._cerebras_available  = False
+        self._nvidia_available    = False
+        self._current_provider    = "ollama"  # "groq" | "cerebras" | "nvidia" | "ollama"
 
         if GROQ_API_KEY:
             print("⏳ Verifico connessione Groq...", end=" ", flush=True)
             if self._check_internet():
-                self._groq_available  = True
+                self._groq_available   = True
                 self._current_provider = "groq"
-                print(f"✅ Groq disponibile ({GROQ_MODEL})")
+                print(f"ok Groq disponibile ({GROQ_MODEL})")
             else:
                 print("❌ Nessuna connessione — uso Ollama locale")
         else:
             print("⚠️  GROQ_API_KEY non trovata — uso Ollama locale")
+
+        if CEREBRAS_API_KEY:
+            print("⏳ Verifico Cerebras...", end=" ", flush=True)
+            try:
+                requests.get("https://api.cerebras.ai", timeout=4)
+                self._cerebras_available = True
+                print(f"ok Cerebras disponibile ({CEREBRAS_MODEL}) — fallback Groq")
+            except Exception:
+                print("⚠️  Cerebras non raggiungibile")
+        else:
+            print("⚠️  CEREBRAS_API_KEY non trovata — fallback diretto su Ollama")
 
         if NVIDIA_API_KEY and self._groq_available:
             print("⏳ Verifico NVIDIA NIM...", end=" ", flush=True)
             try:
                 requests.get("https://integrate.api.nvidia.com", timeout=4)
                 self._nvidia_available = True
-                print(f"✅ NVIDIA NIM disponibile ({NVIDIA_MODEL})")
+                print(f"ok NVIDIA NIM disponibile ({NVIDIA_MODEL})")
             except Exception:
                 print("⚠️  NVIDIA NIM non raggiungibile")
         elif NVIDIA_API_KEY and not self._groq_available:
@@ -1291,6 +1328,75 @@ class Jarvis:
                 pass
         return full_text, tool_calls
 
+    def _call_cerebras(self, messages: list, tools: list) -> tuple[str, list]:
+        """Chiama Cerebras API (OpenAI-compatible). Fallback di Groq."""
+        headers = {
+            "Authorization": f"Bearer {CEREBRAS_API_KEY}",
+            "Content-Type":  "application/json",
+        }
+        payload = {
+            "model":       CEREBRAS_MODEL,
+            "messages":    messages,
+            "tools":       tools if tools else [],
+            "tool_choice": "auto" if tools else "none",
+            "temperature": 0.3,
+            "max_tokens":  1024,
+            "stream":      True,
+        }
+        full_text  = ""
+        tool_calls = []
+        tts_buf    = ""
+        _tc_buf: dict[int, dict] = {}
+
+        print("\n🟡 Cerebras llama-3.3-70B (fallback Groq)...", flush=True)
+        with requests.post(CEREBRAS_URL, json=payload, headers=headers,
+                           timeout=60, stream=True) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                line_s = line.decode("utf-8") if isinstance(line, bytes) else line
+                if line_s.startswith("data: "):
+                    line_s = line_s[6:]
+                if line_s.strip() in ("", "[DONE]"):
+                    continue
+                try:
+                    data = json.loads(line_s)
+                except json.JSONDecodeError:
+                    continue
+                choice = data.get("choices", [{}])[0]
+                delta  = choice.get("delta", {})
+                chunk  = delta.get("content") or ""
+                if chunk:
+                    full_text += chunk
+                    tts_buf   += chunk
+                    print(chunk, end="", flush=True)
+                    if any(c in chunk for c in ('.', '!', '?', '\n')):
+                        self._tts_say(tts_buf.strip())
+                        tts_buf = ""
+                for tc_delta in delta.get("tool_calls", []):
+                    idx2 = tc_delta.get("index", 0)
+                    if idx2 not in _tc_buf:
+                        _tc_buf[idx2] = {"id": tc_delta.get("id",""), "type":"function",
+                                         "function": {"name":"","arguments":""}}
+                    fn = tc_delta.get("function", {})
+                    if fn.get("name"):      _tc_buf[idx2]["function"]["name"]      += fn["name"]
+                    if fn.get("arguments"): _tc_buf[idx2]["function"]["arguments"] += fn["arguments"]
+                if choice.get("finish_reason") in ("stop","tool_calls","length"):
+                    break
+
+        if tts_buf.strip():
+            self._tts_say(tts_buf.strip())
+        print()
+
+        for tc in sorted(_tc_buf.values(), key=lambda x: x.get("id","")):
+            try:
+                args = json.loads(tc["function"].get("arguments","{}") or "{}")
+                tool_calls.append({"function":{"name":tc["function"]["name"],"arguments":args}})
+            except Exception:
+                pass
+        return full_text, tool_calls
+
     def _call_nvidia(self, messages: list, tools: list,
                      image_b64: str = "") -> tuple[str, list]:
         """
@@ -1435,7 +1541,7 @@ class Jarvis:
         ]
         tools = self._tools()
 
-        # ── Routing: Groq (cervello) → NVIDIA (vision/pesante) → Ollama ──────
+        # ── Routing: Groq (cervello) → Cerebras (fallback) → NVIDIA (vision/pesante) → Ollama ──────
         if self._groq_available and not use_vision:
             is_heavy = bool(HEAVY_TASK_KEYWORDS.search(user_msg)) if self._nvidia_available else False
             try:
@@ -1454,18 +1560,56 @@ class Jarvis:
                             self._history = self._history[-(MAX_HISTORY * 2):]
                 return full_text, tool_calls
             except requests.exceptions.ConnectionError as e:
-                print("\n⚠️  Groq non raggiungibile — fallback Ollama", flush=True)
+                print("\n⚠️  Groq non raggiungibile — fallback Cerebras", flush=True)
                 self._err("Groq.connection", exc=e)
                 self._groq_available = False
             except requests.exceptions.HTTPError as e:
                 code = e.response.status_code if e.response else "?"
-                if code == 401:
-                    self._groq_available = False
-                print(f"\n⚠️  Groq errore {code} — fallback Ollama", flush=True)
+                if code in (401, 429):
+                    # 429 = rate limit token esauriti
+                    if code == 429:
+                        print(f"\n⚠️  Groq token esauriti (429) — fallback Cerebras", flush=True)
+                    else:
+                        self._groq_available = False
+                        print(f"\n⚠️  Groq errore {code} — fallback Cerebras", flush=True)
+                else:
+                    print(f"\n⚠️  Groq errore {code} — fallback Cerebras", flush=True)
                 self._err("Groq.http", exc=e, msg=f"HTTP {code}")
             except Exception as e:
-                print(f"\n⚠️  Groq/NVIDIA errore ({e}) — fallback Ollama", flush=True)
+                print(f"\n⚠️  Groq errore ({e}) — fallback Cerebras", flush=True)
                 self._err("Groq.generic", exc=e)
+
+        # ── Fallback 1: Cerebras ──────────────────────────────────────────────
+        if self._cerebras_available and not use_vision:
+            try:
+                full_text, tool_calls = self._call_cerebras(messages, tools)
+                if history is None:
+                    with self._lock:
+                        self._history.append({"role": "user", "content": user_msg})
+                        clean = self._clean_for_history(full_text)
+                        if clean:
+                            self._history.append({"role": "assistant", "content": clean})
+                        if len(self._history) > MAX_HISTORY * 2:
+                            self._history = self._history[-(MAX_HISTORY * 2):]
+                return full_text, tool_calls
+            except requests.exceptions.HTTPError as e:
+                code = e.response.status_code if e.response else "?"
+                if code == 429:
+                    print(f"\n⚠️  Cerebras token esauriti (429) — fallback Ollama", flush=True)
+                elif code == 401:
+                    self._cerebras_available = False
+                    print(f"\n⚠️  Cerebras auth fallita — fallback Ollama", flush=True)
+                else:
+                    print(f"\n⚠️  Cerebras errore {code} — fallback Ollama", flush=True)
+                self._err("Cerebras.http", exc=e, msg=f"HTTP {code}")
+            except requests.exceptions.ConnectionError as e:
+                print("\n⚠️  Cerebras non raggiungibile — fallback Ollama", flush=True)
+                self._cerebras_available = False
+                self._err("Cerebras.connection", exc=e)
+            except Exception as e:
+                print(f"\n⚠️  Cerebras errore ({e}) — fallback Ollama", flush=True)
+                self._err("Cerebras.generic", exc=e)
+
         # ─────────────────────────────────────────────────────────────────────
 
         payload  = {
@@ -1560,7 +1704,7 @@ class Jarvis:
                             if data.get("done"):
                                 break
                         print()
-                    return full_text or "✅ Modello ricaricato, riprova.", tool_calls
+                    return full_text or "ok Modello ricaricato, riprova.", tool_calls
                 except Exception as e2:
                     print(f"\n❌ Impossibile ricaricare il modello: {e2}")
                     return f"❌ Modello non disponibile. Esegui: ollama run {self.model}", []
@@ -1777,7 +1921,7 @@ class Jarvis:
                 result = "\n".join(parts)
                 if len(result) > 3000:
                     result = result[:3000] + "\n...(troncato)"
-                print(f"  ✅ {m_found} ({len(result)} caratteri)")
+                print(f"  ok {m_found} ({len(result)} caratteri)")
                 return {"status": "ok", "output": result}
             else:
                 print(f"  ⚠️  {m_none} {query}")
@@ -1916,12 +2060,12 @@ class Jarvis:
 
         self._executed_cmds.add(cmd)
         if rc == 0:
-            if out and out != "✅ Completato":
+            if out and out != "ok Completato":
                 pass
             else:
-                print("✅ Completato")
-            self._log_cmd(cmd, explanation, "ok", out or "✅ Completato")
-            return {"status": "ok", "output": out or "✅ Completato"}
+                print("ok Completato")
+            self._log_cmd(cmd, explanation, "ok", out or "ok Completato")
+            return {"status": "ok", "output": out or "ok Completato"}
         else:
             if not out:
                 print(f"❌ Errore (rc={rc})")
@@ -1943,8 +2087,8 @@ class Jarvis:
             print(out)
 
         if rc == 0:
-            self._log_cmd(cmd, explanation, "ok", out or "✅ Completato", target=target)
-            return {"status": "ok", "output": out or "✅ Completato"}
+            self._log_cmd(cmd, explanation, "ok", out or "ok Completato", target=target)
+            return {"status": "ok", "output": out or "ok Completato"}
         else:
             self._log_cmd(cmd, explanation, f"error rc={rc}", out or f"❌ Errore rc={rc}", target=target)
             return {"status": "error", "output": out or f"❌ Errore rc={rc}"}
@@ -2031,7 +2175,8 @@ class Jarvis:
         if not any(g in cmd_l for g in generici):
             return cmd
         print("⚠️ Nome generico rilevato.")
-        real = input("  Nome esatto: ").strip()
+        _ask_fn = globals().get("_ask") or (lambda p, **kw: input(p).strip())
+        real = _ask_fn("  Nome esatto del file/cartella: ", "nome esatto")
         if not real:
             print("❌ Annullato"); return None
         for g in generici:
@@ -2170,7 +2315,6 @@ class Jarvis:
         self._cancelled_msg = _cancelled.get(lang, "❌ Cancelled")
 
         if _voice_mode_active and _active_voice_input is not None:
-            # TTS nella lingua corrente
             _confirm_tts = {
                 "it": f"Conferma: {prompt}. Sì o No?",
                 "fr": f"Confirmation : {prompt}. Oui ou Non ?",
@@ -2181,6 +2325,19 @@ class Jarvis:
             }
             self._tts_say(_confirm_tts.get(lang, f"Confirm: {prompt}. Yes or No?"))
             return _voice_confirm(prompt, _active_voice_input, lang=lang)
+        elif _modal_input_queue is not None:
+            # TUI Textual attivo — usa la coda modale
+            print(f"\n⚠️  {prompt} ({label}): ", flush=True)
+            if _modal_prompt_cb is not None:
+                _modal_prompt_cb(f"⚠️ {label}")
+            try:
+                risposta = _modal_input_queue.get(timeout=60).strip().upper()
+            except Exception:
+                risposta = ""
+            finally:
+                if _modal_prompt_cb is not None:
+                    _modal_prompt_cb("Tu: ")
+            return risposta in yes_words
         else:
             risposta = input(f"\n⚠️  {prompt} ({label}): ").strip().upper()
             return risposta in yes_words
@@ -2217,7 +2374,7 @@ class Jarvis:
                 self._mem_engine = _ME(self.mem_dir)
                 self.permanent   = self._mem_engine
             mid = self._mem_engine.add(fact, source="manual")
-            return f"✅ Memorizzato (ID {mid}): '{fact}'"
+            return f"ok Memorizzato (ID {mid}): '{fact}'"
         except Exception:
             pass
         # Fallback JSON — permanent potrebbe essere MemoryEngine, usa lista separata
@@ -2231,7 +2388,7 @@ class Jarvis:
             if not isinstance(data, list): data = []
             data.append({"timestamp": datetime.now().isoformat(), "fact": fact})
             perm_path.write_text(_j.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-            return f"✅ Memorizzato: '{fact}'"
+            return f"ok Memorizzato: '{fact}'"
         except Exception as e:
             return f"❌ Errore memorizzazione: {e}"
 
@@ -2339,7 +2496,7 @@ class Jarvis:
             time.sleep(3)
             _pin_ollama_cores()
             self._stats["errors"] = 0
-            print("✅ Riavviato")
+            print("ok Riavviato")
         except Exception as e:
             print(f"❌ {e}")
 
@@ -2374,9 +2531,9 @@ class Jarvis:
                     self._groq_available   = False
                     return f"💻 Provider: Ollama locale ({self.model})"
                 else:
-                    groq_st   = f"✅ Groq ({GROQ_MODEL})"   if self._groq_available   else "❌ Groq (non disponibile)"
-                    nvidia_st = f"✅ NVIDIA ({NVIDIA_MODEL})" if self._nvidia_available else "❌ NVIDIA (non disponibile)"
-                    ollama_st = f"✅ Ollama ({self.model})"
+                    groq_st   = f"ok Groq ({GROQ_MODEL})"   if self._groq_available   else "❌ Groq (non disponibile)"
+                    nvidia_st = f"ok NVIDIA ({NVIDIA_MODEL})" if self._nvidia_available else "❌ NVIDIA (non disponibile)"
+                    ollama_st = f"ok Ollama ({self.model})"
                     curr = self._current_provider
                     return (
                         f"\U0001f916 Provider attuale: {curr.upper()}\n\n"
@@ -2400,7 +2557,27 @@ class Jarvis:
                 return "__HOST__" + (f":{rest.strip()}" if rest.strip() else "")
             if cmd_part in ('/tts',):
                 self.tts_on = not self.tts_on
-                return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
+                if self.tts_on:
+                    if self._tts_q is None:
+                        if not self._tts_player:
+                            self.tts_on = False
+                            return "⚠️ TTS: nessun player audio (installa: sudo apt install mpg123)"
+                        try:
+                            self._tts_q = queue.Queue(maxsize=8)
+                            self._tts_thread = threading.Thread(
+                                target=self._tts_worker, daemon=True, name="tts"
+                            )
+                            self._tts_thread.start()
+                        except Exception as _e:
+                            self.tts_on = False
+                            self._tts_q = None
+                            return f"⚠️ TTS: errore avvio — {_e}"
+                else:
+                    if self._tts_q is not None:
+                        try: self._tts_q.put_nowait(None)
+                        except Exception: pass
+                        self._tts_q = None
+                return f"🔊 TTS {'ON ok' if self.tts_on else 'OFF ❌'}"
             if cmd_part in ('/agente', '/agent', '/agentic', '/auto'):
                 # Forza modalità agente per il prossimo messaggio
                 rest_agent = rest.strip()
@@ -2502,11 +2679,24 @@ class Jarvis:
                     return "__HOST_HANDLED__"   # gestito sotto nel main loop
                 if result == "__TTS__":
                     self.tts_on = not self.tts_on
-                    return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}"
+                    if self.tts_on and self._tts_q is None:
+                        if self._tts_player:
+                            self._tts_q = queue.Queue(maxsize=8)
+                            self._tts_thread = threading.Thread(
+                                target=self._tts_worker, daemon=True, name="tts"
+                            )
+                            self._tts_thread.start()
+                        else:
+                            self.tts_on = False
+                    elif not self.tts_on and self._tts_q is not None:
+                        try: self._tts_q.put_nowait(None)
+                        except Exception: pass
+                        self._tts_q = None
+                    return f"🔊 TTS {'ON ok' if self.tts_on else 'OFF ❌'}"
                 if result:
                     self.tts_lang = self._lang.tts_lang
                     # Cambio lingua → ricarica il banner con i comandi tradotti
-                    if result.startswith("🌍") or result.startswith("✅") and "lingua" in result.lower():
+                    if result.startswith("🌍") or result.startswith("ok") and "lingua" in result.lower():
                         return "__LANG_CHANGED__"
                     return result
 
@@ -2588,7 +2778,7 @@ class Jarvis:
                     # Inietta la risposta di Qwen come tool result nel followup
                     nvidia_result = f"[Qwen 397B risposta]: {vision_text}"
                     search_results.append({"query": question, "output": nvidia_result})
-                    print(f"\n✅ Qwen ha risposto ({len(vision_text)} chars)", flush=True)
+                    print(f"\nok Qwen ha risposto ({len(vision_text)} chars)", flush=True)
                 except Exception as e:
                     print(f"\n❌ Qwen errore: {e}", flush=True)
                     search_results.append({"query": question, "output": f"Errore vision model: {e}"})
@@ -2699,7 +2889,7 @@ class Jarvis:
                 "Rispondi all'utente in modo conciso. "
                 "Se tutto è andato bene dillo chiaramente. "
                 "Se c'è un errore analizzalo. "
-                "Non ripetere comandi già completati con ✅."
+                "Non ripetere comandi già completati con ok."
             )
             print()
             # history=[] evita che _call_model salvi di nuovo nella history principale
@@ -2747,7 +2937,7 @@ class Jarvis:
             return self.forget_all(), output_lines
         if lower == 'tts':
             self.tts_on = not self.tts_on
-            return f"🔊 TTS {'ON ✅' if self.tts_on else 'OFF ❌'}", output_lines
+            return f"🔊 TTS {'ON ok' if self.tts_on else 'OFF ❌'}", output_lines
 
         # Attiva agente per richieste complesse
         if AGENT_OK and self._agent and should_use_agent(user_msg):
@@ -2878,12 +3068,12 @@ class Jarvis:
                         elif text:
                             await message.channel.send(text[:2000])
                         else:
-                            await message.channel.send("✅ Fatto")
+                            await message.channel.send("ok Fatto")
                     except asyncio.TimeoutError:
                         await message.channel.send("⏱️ Timeout (150s)")
                     except Exception as e:
                         await message.channel.send(f"❌ {str(e)[:200]}")
-            print("✅ Discord inizializzato")
+            print("ok Discord inizializzato")
         except Exception as e:
             print(f"❌ Discord init: {e}")
 
@@ -2929,13 +3119,13 @@ class Jarvis:
             print(f"\n{sep}")
             print("🧠 JARVIS v8.0 — Multi-Provider + Vision")
             print(sep)
-            groq_st   = f"✅ {GROQ_MODEL}"   if self._groq_available   else "❌ N/D"
-            nvidia_st = f"✅ {NVIDIA_MODEL}"  if self._nvidia_available else "❌ N/D"
+            groq_st   = f"ok {GROQ_MODEL}"   if self._groq_available   else "❌ N/D"
+            nvidia_st = f"ok {NVIDIA_MODEL}"  if self._nvidia_available else "❌ N/D"
             print(f"🤖 Groq:       {groq_st}")
             print(f"🟣 NVIDIA NIM: {nvidia_st}")
             print(f"💻 Ollama:     {self.model} (fallback)")
-            print(f"🔊 TTS:        {'✅' if self.tts_on else '❌'}")
-            print(f"💙 Discord:    {'✅' if self.disc_on else '❌'}")
+            print(f"🔊 TTS:        {'ok' if self.tts_on else '❌'}")
+            print(f"💙 Discord:    {'ok' if self.disc_on else '❌'}")
             mem_type = "SQLite+ChromaDB" if self._mem_engine else "JSON"
             print(f"🧠 Memoria:    {len(self.permanent)} fatti ({mem_type})")
             print(f"💡 Comandi: /provider groq|nvidia|ollama")
@@ -2943,7 +3133,7 @@ class Jarvis:
 
 
 # ─── Loop vocale ──────────────────────────────────────────────────────────────
-def voice_loop(jarvis: Jarvis, voice_input: VoiceInput) -> bool:
+def voice_loop(jarvis: Jarvis, voice_input: VoiceInput, cmd_ctx=None) -> bool:
     session = WakeWordSession(timeout=WAKE_SESSION_TIMEOUT)
 
     if not voice_input.is_ready():
@@ -3022,7 +3212,7 @@ def voice_loop(jarvis: Jarvis, voice_input: VoiceInput) -> bool:
                 if has_wake:
                     session.activate()
                     msg = _lm.strip_wake(text_clean) if _lm else _strip_wake_word(text_clean)
-                    print(f"✅ Wake word! Sessione aperta per {WAKE_SESSION_TIMEOUT//60} min")
+                    print(f"ok Wake word! Sessione aperta per {WAKE_SESSION_TIMEOUT//60} min")
                     if msg:
                         print(f"⌨️  Tu: {msg}\n")
                         jarvis.process(msg)
@@ -3041,12 +3231,29 @@ def voice_loop(jarvis: Jarvis, voice_input: VoiceInput) -> bool:
                 # Tutto passa per process() — stesso comportamento di tastiera
                 print(f"⌨️  Tu: {text_clean}\n")
                 result = jarvis.process(text_clean)
-                if result == "__EXIT__":
-                    print("\n👋 Ciao!")
-                    voice_input.stop()
-                    return False
-                if result == "__SWITCH_MODE__":
-                    return True
+                # ── Dispatch comandi speciali nel loop vocale ─────────────────
+                _handled = False
+                if cmd_ctx is not None and _cmd_dispatch is not None:
+                    cmd_result = _cmd_dispatch(result, cmd_ctx)
+                    if cmd_result is not None:
+                        _handled = True
+                        if cmd_result.action == "break":
+                            voice_input.stop()
+                            return False
+                        elif cmd_result.action == "switch_keyboard":
+                            return True
+                        # Per altri token (sleep, lang, tts, ecc.): messaggio già stampato
+                        if cmd_result.message:
+                            jarvis._tts_say(cmd_result.message)
+                # Fallback per token che commands_module non gestisce
+                if not _handled:
+                    if result == "__EXIT__":
+                        print("\n👋 Ciao!")
+                        voice_input.stop()
+                        return False
+                    if result == "__SWITCH_MODE__":
+                        return True
+                    # Risposta normale: il tts è già chiamato da process() via _tts_say
                 session.touch()
                 print()
 
@@ -3151,14 +3358,14 @@ def _voice_confirm(prompt, vi, lang="it"):
         "tr": "❌ İptal", "sv": "❌ Avbrutet",
     }
     _confirmed_msgs = {
-        "it": "✅ Confermato", "fr": "✅ Confirmé", "en": "✅ Confirmed",
-        "de": "✅ Bestätigt", "es": "✅ Confirmado", "pt": "✅ Confirmado",
-        "ru": "✅ Подтверждено", "nl": "✅ Bevestigd", "pl": "✅ Potwierdzone",
-        "tr": "✅ Onaylandı", "sv": "✅ Bekräftat",
+        "it": "ok Confermato", "fr": "ok Confirmé", "en": "ok Confirmed",
+        "de": "ok Bestätigt", "es": "ok Confirmado", "pt": "ok Confirmado",
+        "ru": "ok Подтверждено", "nl": "ok Bevestigd", "pl": "ok Potwierdzone",
+        "tr": "ok Onaylandı", "sv": "ok Bekräftat",
     }
     hint1, hint2 = _hints.get(lang, _hints["en"])
     cancelled = _cancelled_msgs.get(lang, "❌ Cancelled")
-    confirmed = _confirmed_msgs.get(lang, "✅ Confirmed")
+    confirmed = _confirmed_msgs.get(lang, "ok Confirmed")
 
     for attempt in range(2):
         hint = f" ({hint1})" if attempt == 0 else f" — {hint2}"
@@ -3270,7 +3477,7 @@ def main():
             execute_search= lambda q, expl: bot._execute_search(q, expl) if bot.search else None,
             lang          = lang_mgr,
         )
-        print("🤖 Agente: ✅ attivo")
+        print("🤖 Agente: ok attivo")
     else:
         print("🤖 Agente: ❌ agent_module.py non trovato")
     if bot.disc_on and bot._disc_bot:
@@ -3295,7 +3502,13 @@ def main():
     # Il banner statico già stampato da _print_banner viene rimpiazzato.
     # Da questo momento la zona A è gestita dal thread LiveBanner.
     _vi_ref    = [voice_input]
-    _status_bar = _init_live_banner(bot, lang_mgr)   # pulisce schermo, disegna, avvia thread
+    _status_bar = _init_live_banner(bot, lang_mgr)
+
+    # Segnala che il setup (password, TTS, Discord, modalità) è completato.
+    # In modalità fallback ANSI, il thread banner aspetta questo segnale
+    # prima di pulire lo schermo e disegnare il banner per la prima volta.
+    # Con Textual questo è un no-op (Textual gestisce il proprio ciclo).
+    _notify_setup_done()
 
     # ── Buffer conversazione ──────────────────────────────────────────────────
     _chat_buf: list[str] = []
@@ -3303,11 +3516,100 @@ def main():
     def _chat_print(text: str):
         if not text:
             return
-        print(text)
+        if _status_bar:
+            _status_bar.write_jarvis(text)
+        else:
+            print(text)
         lines = text.splitlines()
         _chat_buf.extend(lines)
         if len(_chat_buf) > 500:
             del _chat_buf[:-500]
+
+    # ── Coda input thread-safe (Textual → worker) ─────────────────────────────
+    import queue as _queue_mod
+    _input_queue: "_queue_mod.Queue[str]" = _queue_mod.Queue()
+    _modal_q:     "_queue_mod.Queue[str]" = _queue_mod.Queue()
+    _modal_active: threading.Event        = threading.Event()
+
+    def _on_tui_input(text: str):
+        if _modal_active.is_set():
+            _modal_q.put(text)
+        else:
+            _input_queue.put(text)
+
+    if _status_bar:
+        _status_bar.set_input_callback(_on_tui_input)
+
+    def _set_tui_prompt(text: str):
+        """Aggiorna il placeholder della casella Input del TUI (thread-safe)."""
+        if _status_bar and not _status_bar._fallback and _status_bar._app:
+            try:
+                _status_bar._app.call_from_thread(_status_bar._app.set_prompt, text)
+            except Exception:
+                pass
+
+    # Collega coda modale e callback al modulo globale (usati da _confirm)
+    globals()["_modal_input_queue"] = _modal_q
+    globals()["_modal_prompt_cb"]   = _set_tui_prompt
+
+    # Monkey-patch get(): attiva il flag durante l'attesa modale
+    _orig_get = _modal_q.get
+    def _modal_get_flagged(*args, **kwargs):
+        _modal_active.set()
+        try:
+            return _orig_get(*args, **kwargs)
+        finally:
+            _modal_active.clear()
+    _modal_q.get = _modal_get_flagged
+
+    def _get_user_input(prompt: str = "Tu: ") -> str:
+        """Input principale del loop — usa _input_queue in TUI, stdin in fallback."""
+        if _status_bar and not _status_bar._fallback:
+            _status_bar._ready.wait()
+            return _input_queue.get()
+        return input(prompt).strip()
+
+    def _ask(prompt: str, placeholder: str = None, timeout: float = 120.0) -> str:
+        """
+        Input modale generico per qualsiasi richiesta interattiva nel worker
+        (conferme, nomi, scelte menu, ecc.).
+
+        TUI Textual: attiva la coda modale, aggiorna il placeholder,
+        aspetta la risposta dalla coda modale.
+        Fallback stdin: stampa il prompt e chiama input().
+        """
+        tui_active = _status_bar and not _status_bar._fallback
+        print(prompt, flush=True)
+        if tui_active:
+            ph = placeholder or prompt.split(":")[-1].strip()[:30] or "rispondi..."
+            _set_tui_prompt(ph)
+            try:
+                answer = _modal_q.get(timeout=timeout)
+            except Exception:
+                answer = ""
+            finally:
+                _set_tui_prompt("Tu: ")
+            return answer.strip()
+        else:
+            return input().strip()
+
+    # ── CommandContext per commands_module ───────────────────────────────────
+    _use_voice_ref     = [use_voice]
+    _vi_ref            = [voice_input]
+    _session_ref       = [True]
+
+    def _make_cmd_ctx():
+        return CommandContext(
+            ask          = _ask,
+            print_fn     = _chat_print,
+            bot          = bot,
+            lang_mgr     = lang_mgr,
+            vi_ref       = _vi_ref,
+            use_voice    = _use_voice_ref,
+            session_active = _session_ref,
+            SD_OK        = SD_OK,
+            WHISPER_OK   = WHISPER_OK,
+        ) if COMMANDS_MODULE_OK else None
 
     # ── PIN di sessione (SOLO modalità tastiera) ──────────────────────────────
     _session_active = True
@@ -3318,48 +3620,81 @@ def main():
         """Chiede il PIN. Ritorna True se corretto o se nessun PIN configurato."""
         if _secrets_mgr is None or not _secrets_mgr.has_pin:
             return True
-        import getpass
-        try:
-            entered = getpass.getpass(f"   {prompt}")
-        except Exception:
-            entered = input(f"   {prompt}").strip()
+        tui_active = _status_bar and not _status_bar._fallback
+        if tui_active:
+            entered = _ask(f"   {prompt}", "PIN")
+        else:
+            import getpass
+            try:
+                entered = getpass.getpass(f"   {prompt}")
+            except Exception:
+                entered = input(f"   {prompt}").strip()
         if not _secrets_mgr.verify_pin(entered):
-            print("   ❌ PIN errato"); return False
+            _chat_print("   ❌ PIN errato"); return False
         return True
 
     # PIN richiesto solo se modalità tastiera
     if not use_voice and _secrets_mgr and _secrets_mgr.has_pin:
-        print("🔐 Sessione bloccata — inserisci PIN per iniziare")
+        _chat_print("🔐 Sessione bloccata — inserisci PIN per iniziare")
         _attempts = 0
         while not _request_pin():
             _attempts += 1
             if _attempts >= 3:
-                print("❌ Troppi tentativi — uscita"); sys.exit(1)
-        print("✅ Accesso consentito\n")
+                _chat_print("❌ Troppi tentativi — uscita"); sys.exit(1)
+        _chat_print("ok Accesso consentito\n")
         _session_last_t = time.time()
 
     # ── Loop principale ───────────────────────────────────────────────────────
-    while True:
-        try:
-            if use_voice and voice_input:
-                global _active_voice_input, _voice_mode_active
-                # Collega TTS per aspettare fine risposta prima di ascoltare
-                if hasattr(bot, '_tts_q'):
-                    class _TTSRef:
-                        def __init__(self, b): self._b = b
-                        @property
-                        def is_speaking(self): return not self._b._tts_q.empty() if self._b._tts_q else False
-                    voice_input._tts_ref = _TTSRef(bot)
-                _active_voice_input = voice_input
-                _voice_mode_active  = True
-                want_keyboard = voice_loop(bot, voice_input)
-                _voice_mode_active  = False
-                _active_voice_input = None
-                if not want_keyboard:
-                    break
-                use_voice = False
-                if _secrets_mgr and _secrets_mgr.has_pin:
-                    print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA — inserisci PIN\n{sep}\n")
+    def _jarvis_worker():
+        nonlocal use_voice, voice_input, _session_active, _session_last_t
+        # Aspetta che Textual sia pronto, poi reindirizza stdout alla ChatLog
+        if _status_bar and not _status_bar._fallback:
+            _status_bar._ready.wait()
+            try:
+                from jarvis_banner import redirect_stdout_to_tui
+                redirect_stdout_to_tui(_status_bar)
+            except Exception:
+                pass
+        while True:
+            try:
+                if use_voice and voice_input:
+                    global _active_voice_input, _voice_mode_active
+                    # Collega TTS per aspettare fine risposta prima di ascoltare
+                    if hasattr(bot, '_tts_q'):
+                        class _TTSRef:
+                            def __init__(self, b): self._b = b
+                            @property
+                            def is_speaking(self): return not self._b._tts_q.empty() if self._b._tts_q else False
+                        voice_input._tts_ref = _TTSRef(bot)
+                    _active_voice_input = voice_input
+                    _voice_mode_active  = True
+                    want_keyboard = voice_loop(bot, voice_input, cmd_ctx=_make_cmd_ctx())
+                    _voice_mode_active  = False
+                    _active_voice_input = None
+                    if not want_keyboard:
+                        break
+                    use_voice = False
+                    if _secrets_mgr and _secrets_mgr.has_pin:
+                        print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA — inserisci PIN\n{sep}\n")
+                        _attempts = 0
+                        while not _request_pin():
+                            _attempts += 1
+                            if _attempts >= 3:
+                                print("❌ Troppi tentativi — uscita"); raise SystemExit(1)
+                        _session_active = True
+                        _session_last_t = time.time()
+                        print("ok Accesso consentito\n")
+                    else:
+                        print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA\n{sep}\n")
+                    continue
+
+                # Timeout sessione (solo tastiera)
+                if _secrets_mgr and _secrets_mgr.has_pin and _session_active:
+                    if time.time() - _session_last_t > SESSION_TIMEOUT:
+                        print("\n⏰ Sessione scaduta — inserisci PIN")
+                        _session_active = False
+                if _secrets_mgr and _secrets_mgr.has_pin and not _session_active:
+                    print("🔐 Sessione bloccata — inserisci PIN per continuare")
                     _attempts = 0
                     while not _request_pin():
                         _attempts += 1
@@ -3367,281 +3702,119 @@ def main():
                             print("❌ Troppi tentativi — uscita"); raise SystemExit(1)
                     _session_active = True
                     _session_last_t = time.time()
-                    print("✅ Accesso consentito\n")
-                else:
-                    print(f"\n{sep}\n⌨️  MODALITÀ TASTIERA\n{sep}\n")
-                continue
+                    print("ok Sessione riaperta\n")
 
-            # Timeout sessione (solo tastiera)
-            if _secrets_mgr and _secrets_mgr.has_pin and _session_active:
-                if time.time() - _session_last_t > SESSION_TIMEOUT:
-                    print("\n⏰ Sessione scaduta — inserisci PIN")
-                    _session_active = False
-            if _secrets_mgr and _secrets_mgr.has_pin and not _session_active:
-                print("🔐 Sessione bloccata — inserisci PIN per continuare")
-                _attempts = 0
-                while not _request_pin():
-                    _attempts += 1
-                    if _attempts >= 3:
-                        print("❌ Troppi tentativi — uscita"); raise SystemExit(1)
-                _session_active = True
-                _session_last_t = time.time()
-                print("✅ Sessione riaperta\n")
+                user_input = _get_user_input("Tu: ")
 
-            user_input = input("Tu: ").strip()
-
-            if user_input.lower() in ('microfono', 'vocale', 'modalità', 'modalita',
-                                      'cambia modalità', 'cambia modalita',
-                                      'passa a vocale') and SD_OK and WHISPER_OK:
-                if voice_input is None:
-                    mic = choose_microphone()
-                    if mic:
-                        voice_input = VoiceInput(mic)
-                if voice_input:
-                    use_voice = True
-                    print("🎙️  Passato a modalità vocale")
-                else:
-                    print("❌ Impossibile attivare il microfono")
-                continue
-
-            if not user_input:
-                continue
-
-            if user_input.lower() in ('esci', 'exit', 'quit', 'bye', '/esci', '/exit', '/quit'):
-                print("\n👋 Ciao!")
-                break
-
-            print()
-            result = bot.process(user_input)
-            _session_last_t = time.time()
-            if result == "__EXIT__":
-                print("\n👋 Ciao!")
-                break
-            elif result == "__SWITCH_MODE__":
-                if SD_OK and WHISPER_OK:
+                if user_input.lower() in ('microfono', 'vocale', 'modalità', 'modalita',
+                                          'cambia modalità', 'cambia modalita',
+                                          'passa a vocale') and SD_OK and WHISPER_OK:
                     if voice_input is None:
                         mic = choose_microphone()
                         if mic:
                             voice_input = VoiceInput(mic)
                     if voice_input:
                         use_voice = True
-                        _vi_ref[0] = voice_input
-                        _session_active = True  # in voce PIN non serve
                         print("🎙️  Passato a modalità vocale")
                     else:
                         print("❌ Impossibile attivare il microfono")
-                else:
-                    print("⚠️ Dipendenze vocali non disponibili")
-            elif result == "__LANG_CHANGED__":
-                # Lingua cambiata — aggiorna tts_lang
-                bot.tts_lang = lang_mgr.tts_lang
-                # Sincronizza speaker verifier
-                if voice_input and hasattr(voice_input, '_speaker_ref'):
-                    sp = voice_input._speaker_ref
-                    if sp and hasattr(sp, 'current_lang'):
-                        sp.current_lang = bot.tts_lang
-                _new_lang = bot.tts_lang.upper()
-                print(f"\n  Lingua cambiata → {_new_lang}")
-                # Ristampa il menu comandi nella nuova lingua (senza ridisegnare tutto il banner)
-                _reprint_menu(bot.tts_lang)
-            elif result == "__SLEEP__":
-                _session_active = False
-                print("💤 Sessione bloccata — a presto!")
-                continue
-            elif result == "__ADD_VOICE__":
-                sp = getattr(voice_input, '_speaker_ref', None) if voice_input else None
-                # Se non c'è un microfono attivo, lo inizializziamo al volo
-                if voice_input is None and SD_OK and WHISPER_OK:
-                    print("\n  Scegli il microfono per la registrazione:")
-                    _tmp_mic = choose_microphone()
-                    if _tmp_mic:
-                        voice_input = VoiceInput(_tmp_mic)
-                        _speaker_tmp = SpeakerVerifier()
-                        voice_input._speaker_ref = _speaker_tmp
-                        voice_input._lang_ref = lang_mgr
-                        sp = _speaker_tmp
-                        print("  Microfono pronto.")
-                    else:
-                        print("  Nessun microfono selezionato.")
-                if sp and hasattr(sp, 'add_profile'):
-                    _vname = input("  Nome utente (es. radostin): ").strip().lower() or "owner"
-                    _vlang = bot.tts_lang
-                    print(f"\n  Parla per 8-10 secondi in {_vlang.upper()}...")
-                    _vaudio = voice_input._record_sd(timeout=12.0, silence_sec=10.0)
-                    if _vaudio is not None:
-                        sp.add_profile(_vaudio, _vname, _vlang)
-                        print(f"  Profilo '{_vname}' salvato.")
-                    else:
-                        print("  Registrazione troppo corta — riprova")
-                elif not SD_OK or not WHISPER_OK:
-                    print("  Dipendenze audio mancanti (sounddevice / faster-whisper).")
-            elif result == "__LIST_VOICES__":
-                # Ottieni o crea speaker verifier
-                sp = getattr(voice_input, '_speaker_ref', None) if voice_input else None
-
-                # Se non c'è microfono attivo, inizializzalo al volo (come per __ADD_VOICE__)
-                _tmp_vi = None
-                if sp is None and SD_OK and WHISPER_OK:
-                    _tmp_mic = choose_microphone()
-                    if _tmp_mic:
-                        _tmp_vi = VoiceInput(_tmp_mic)
-                        _tmp_sp = SpeakerVerifier()
-                        _tmp_vi._speaker_ref = _tmp_sp
-                        _tmp_vi._lang_ref = lang_mgr
-                        sp = _tmp_sp
-                        voice_input = _tmp_vi
-                        _vi_ref[0]  = _tmp_vi
-
-                if sp is None:
-                    print("  Dipendenze audio mancanti (sounddevice / faster-whisper).")
-                    print()
                     continue
 
-                # ── Mostra profili esistenti ──────────────────────────────────
-                while True:
-                    profiles = sp.list_profiles() if hasattr(sp, 'list_profiles') else []
-                    print()
-                    if profiles:
-                        print("  Profili vocali registrati:")
-                        for idx, (_pn, _pl) in enumerate(sorted(profiles), 1):
-                            _pm = "  <- attivo" if _pl == bot.tts_lang else ""
-                            print(f"    {idx}. {_pn} [{_pl.upper()}]{_pm}")
-                    else:
-                        print("  Nessun profilo registrato.")
+                if not user_input:
+                    continue
 
-                    print()
-                    print("  a) Aggiungi nuovo profilo")
-                    if profiles:
-                        print("  d) Elimina profilo")
-                    print("  q) Esci")
-                    print()
-                    scelta = input("  Scelta: ").strip().lower()
+                if user_input.lower() in ('esci', 'exit', 'quit', 'bye', '/esci', '/exit', '/quit'):
+                    _chat_print("👋 Ciao!")
+                    break
 
-                    if scelta == 'q' or scelta == '':
-                        print()
-                        break
+                _chat_print(f"[dim]⏳ elaborazione...[/dim]")
+                result = bot.process(user_input)
+                _session_last_t = time.time()
+                # ── Dispatch comandi speciali ─────────────────────────────────
+                _ctx = _make_cmd_ctx()
+                if _ctx:
+                    # Aggiorna riferimenti mutabili con stato corrente
+                    _use_voice_ref[0]  = use_voice
+                    _vi_ref[0]         = voice_input
+                    _session_ref[0]    = _session_active
+                    cmd_result = _cmd_dispatch(result, _ctx)
+                    if cmd_result is not None:
+                        # Applica eventuali cambi di stato
+                        use_voice       = _use_voice_ref[0]
+                        voice_input     = _vi_ref[0]
+                        _session_active = _session_ref[0]
+                        if cmd_result.action == "break":
+                            break
+                        elif cmd_result.action == "continue":
+                            continue
+                        elif cmd_result.action == "reprint_menu":
+                            _reprint_menu(bot.tts_lang)
+                        # switch_voice / switch_keyboard: stato già aggiornato
+                        continue
 
-                    elif scelta == 'd':
-                        # ── Elimina profilo ───────────────────────────────────
-                        if not profiles:
-                            print("  Nessun profilo da eliminare.")
-                            continue
-                        _sorted = sorted(profiles)
-                        print()
-                        for idx, (_pn, _pl) in enumerate(_sorted, 1):
-                            print(f"    {idx}. {_pn} [{_pl.upper()}]")
-                        print()
-                        _del_in = input("  Numero da eliminare (invio per annullare): ").strip()
-                        if not _del_in:
-                            print("  Annullato.")
-                            continue
-                        try:
-                            _del_idx = int(_del_in) - 1
-                            if not 0 <= _del_idx < len(_sorted):
-                                raise ValueError
-                        except ValueError:
-                            print("  Numero non valido.")
-                            continue
-                        _del_name, _del_lang = _sorted[_del_idx]
-                        _conf = input(f"  Elimina '{_del_name} [{_del_lang.upper()}]'? (s/N): ").strip().lower()
-                        if _conf == 's':
-                            _del_key = f"{_del_name}_{_del_lang}"
-                            sp._profiles.pop(_del_key, None)
-                            _del_path = sp._dir / f"{_del_name}_{_del_lang}.npy"
-                            if _del_path.exists():
-                                _del_path.unlink()
-                            print(f"  Profilo '{_del_name} [{_del_lang.upper()}]' eliminato.")
+                # Fallback legacy (commands_module non disponibile)
+                if result == "__EXIT__":
+                    _chat_print("👋 Ciao!")
+                    break
+                elif result == "__SWITCH_MODE__":
+                    if SD_OK and WHISPER_OK:
+                        mic = choose_microphone()
+                        if mic:
+                            voice_input = VoiceInput(mic)
+                            _vi_ref[0]  = voice_input
+                        if voice_input:
+                            use_voice = True
+                            _use_voice_ref[0] = True
+                            _session_active = True
+                            print("🎙️  Passato a modalità vocale")
                         else:
-                            print("  Annullato.")
-                        print()
-
-                    elif scelta == 'a':
-                        _vname = input("  Nome utente (es. radostin): ").strip().lower()
-                        if not _vname:
-                            print("  Nome non valido.")
-                            continue
-
-                        # Lingua: usa quella corrente o chiede
-                        print(f"  Lingua [{bot.tts_lang.upper()}] (invio per confermare): ", end="")
-                        _vlang_in = input().strip().lower()
-                        _vlang = _vlang_in if _vlang_in else bot.tts_lang
-
-                        print(f"\n  Parla per 8-10 secondi in {_vlang.upper()}...")
-                        print("  (premi Invio quando sei pronto)")
-                        input()
-                        print("  Registrazione in corso...")
-                        _vaudio = voice_input._record_sd(timeout=12.0, silence_sec=10.0)
-                        if _vaudio is not None and len(_vaudio) > 0:
-                            sp.add_profile(_vaudio, _vname, _vlang)
-                            print(f"  Profilo '{_vname}' [{_vlang.upper()}] salvato.")
-                        else:
-                            print("  Registrazione troppo corta — riprova.")
-                        print()
-
+                            print("❌ Impossibile attivare il microfono")
                     else:
-                        print("  Scelta non valida.")
-
-            elif result and result.startswith("__HOST__"):
-                # ── Gestione /host ────────────────────────────────────────────
-                arg = result[len("__HOST__"):].lstrip(":").strip().lower()
-
-                if not arg or arg == "list" or arg == "lista":
-                    print(bot.ssh.cmd_list())
-
-                elif arg == "add" or arg == "aggiungi":
-                    bot.ssh.cmd_add_interactive()
-
-                elif arg == "remove" or arg == "rimuovi" or arg == "elimina":
-                    print(bot.ssh.cmd_remove_interactive())
-
-                elif arg == "disconnect" or arg == "disconnetti":
-                    if bot.ssh.is_connected():
-                        name = bot.ssh.active_host.name if bot.ssh.active_host else "?"
-                        bot.ssh.disconnect()
-                        print(f"\n  Disconnesso da '{name}'.")
-                    else:
-                        print("\n  Nessun host connesso.")
-
-                else:
-                    # Prova a connettersi all'host con quel nome
-                    print(f"\n  Connessione a '{arg}'...")
-                    ok, msg = bot.ssh.connect(arg)
-                    if ok:
-                        ah = bot.ssh.active_host
-                        print(f"  {msg}")
-                        print(f"  OS: {ah.os_type}  |  {ah.hw_info.get('os','?')}")
-                        print(f"  CPU: {ah.hw_info.get('cpu','?')}")
-                        print(f"  RAM: {ah.hw_info.get('ram','?')}")
-                        print(f"  Dir: {ah.cwd}")
-                    else:
-                        print(f"  {msg}")
-                print()
-
-            else:
-                if result:
-                    _chat_print(result)
-                    bot._tts_say(result)
-                    # Sincronizza lingua con speaker verifier
+                        print("⚠️ Dipendenze vocali non disponibili")
+                elif result == "__LANG_CHANGED__":
+                    bot.tts_lang = lang_mgr.tts_lang
                     if voice_input and hasattr(voice_input, '_speaker_ref'):
                         sp = voice_input._speaker_ref
-                        if sp and hasattr(sp, 'current_lang'):
-                            sp.current_lang = bot.tts_lang
+                        if sp: sp.current_lang = bot.tts_lang
+                    _reprint_menu(bot.tts_lang)
+                elif result == "__SLEEP__":
+                    _session_active = False
+                    _session_ref[0] = False
+                    print("💤 Sessione bloccata — a presto!")
+                    continue
+
+                else:
+                    # result è una risposta testuale (risposta AI, messaggio errore, ecc.)
+                    # Lo streaming AI ha già stampato i chunk via stdout.
+                    # Ma messaggi di errore/comando (❌, ⚠️) devono essere sempre stampati.
+                    if result:
+                        is_stream = not (result.startswith("❌") or result.startswith("⚠️")
+                                         or result.startswith("🔊") or result.startswith("📊"))
+                        if not is_stream:
+                            _chat_print(result)
+                        bot._tts_say(result)
+                        # Sincronizza lingua con speaker verifier
+                        if voice_input and hasattr(voice_input, '_speaker_ref'):
+                            sp = voice_input._speaker_ref
+                            if sp and hasattr(sp, 'current_lang'):
+                                sp.current_lang = bot.tts_lang
+
+            except KeyboardInterrupt:
+                print("\n\n👋 Ctrl+C")
+                if _status_bar: _status_bar.stop()
+                break
+            except Exception as e:
+                import traceback
+                _chat_print(f"\n❌ {e}")
+                traceback.print_exc()
+                # Log errore software nella log separata
+                _log_software_error(bot.log_dir, "main.loop", exc=e)
                 print()
 
-        except KeyboardInterrupt:
-            print("\n\n👋 Ctrl+C")
-            _status_bar.stop()
-            break
-        except Exception as e:
-            import traceback
-            print(f"\n❌ {e}")
-            traceback.print_exc()
-            # Log errore software nella log separata
-            _log_software_error(bot.log_dir, "main.loop", exc=e)
-            print()
+    # ── Avvia TUI (main thread) + worker (thread separato) ───────────────────
+    _run_jarvis_tui(_status_bar, _jarvis_worker)
 
     # Il cleanup viene eseguito automaticamente da CleanupManager via atexit
-    # Non serve chiamarlo esplicitamente qui
 
 
 if __name__ == "__main__":
