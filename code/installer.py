@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-JARVIS v8.0 — Installer cross-platform
-Supporta: Linux (Ubuntu/Debian), macOS, Windows
+JARVIS v9.0 — Installer cross-platform
+Supporta: Linux (Ubuntu/Debian/Arch/CachyOS), macOS, Windows
 
 Logica:
   - Rileva OS e configura di conseguenza
   - Installa Ollama automaticamente se mancante
-  - Linux:   apt + venv jarvisenv in ~
+  - Linux:   pacman/apt + venv jarvisenv in ~ (Python 3.12 richiesto per ROCm)
   - macOS:   Homebrew + nessun venv (Python sistema)
   - Windows: winget + nessun venv (Python sistema)
   - Cerca i file in ../code (JARVIS_MAIN/code)
   - Cerca il Modelfile in .. (JARVIS_MAIN/Modelfile)
   - Sposta i file in ~/Documenti/modelli (o equivalente per OS)
   - Applica patch OS-specific al codice (player audio, mute mic)
-  - Configura .env con API key
+  - Configura .env con API key (Groq, Cerebras, NVIDIA, Tavily, ecc.)
   - Crea script di avvio appropriato per OS
+  - Su CachyOS/Arch: configura ROCm per iGPU AMD (SepFormer GPU)
 """
 
 import os, sys, json, shutil, subprocess, platform, tempfile, urllib.request
@@ -29,7 +30,8 @@ IS_LINUX   = OS == "Linux"
 IS_MAC     = OS == "Darwin"
 IS_WINDOWS = OS == "Windows"
 
-PYTHON_MIN = (3, 10)
+PYTHON_MIN     = (3, 12)
+PYTHON_MIN_STR = "3.12"   # richiesto per torch ROCm
 
 # ── Cartella destinazione ──────────────────────────────────────────────────────
 # Linux/Mac:  ~/Documenti/modelli  oppure  ~/Documents/modelli
@@ -124,16 +126,31 @@ def python_cmd() -> list:
 # ════════════════════════════════════════════════════════════════════════════
 
 def check_system():
-    step(1, 8, "Controllo sistema")
+    step(1, 9, "Controllo sistema")
 
     v = sys.version_info
     if (v.major, v.minor) < PYTHON_MIN:
-        err(f"Python {PYTHON_MIN[0]}.{PYTHON_MIN[1]}+ richiesto, trovato {v.major}.{v.minor}")
+        err(f"Python {PYTHON_MIN_STR}+ richiesto, trovato {v.major}.{v.minor}")
+        err("Su CachyOS/Arch: python3.12 dovrebbe essere disponibile")
+        err("Avvia l'installer con: python3.12 installer.py")
         sys.exit(1)
     ok(f"Python {v.major}.{v.minor}.{v.micro}")
     ok(f"Sistema: {OS} {platform.release()}")
     ok(f"Destinazione: {DEST_DIR}")
     ok(f"Sorgente codice: {CODE_DIR}")
+
+    # Rilevamento ROCm (AMD GPU) su Linux
+    if IS_LINUX:
+        rocminfo = shutil.which("rocminfo") or "/opt/rocm/bin/rocminfo"
+        if Path(rocminfo).exists():
+            r = run([rocminfo], capture=True, check=False)
+            if "gfx" in (r.stdout if r.returncode == 0 else ""):
+                ok("ROCm rilevato — GPU AMD disponibile per SepFormer")
+                globals()["ROCM_AVAILABLE"] = True
+            else:
+                info("ROCm installato ma nessuna GPU gfx rilevata")
+        else:
+            info("ROCm non installato — SepFormer usera' CPU")
 
 # ════════════════════════════════════════════════════════════════════════════
 # STEP 2 — Installa Ollama (tutti gli OS)
@@ -374,6 +391,8 @@ def create_venv():
 # STEP 5 — Dipendenze Python
 # ════════════════════════════════════════════════════════════════════════════
 
+ROCM_AVAILABLE = False  # aggiornato da check_system()
+
 PIP_PACKAGES = {
     "Core": [
         "requests>=2.31.0",
@@ -383,13 +402,13 @@ PIP_PACKAGES = {
         "cryptography>=42.0.0",
         "chromadb>=0.5.0",
         "sentence-transformers>=3.0.0",
+        "soundfile>=0.12.1",
     ],
     "STT": [
         "faster-whisper>=1.0.0",
     ],
     "Audio": [
         "sounddevice>=0.4.6",
-        "soundfile>=0.12.1",
     ],
     "TTS": [
         "gTTS>=2.5.0",
@@ -398,39 +417,59 @@ PIP_PACKAGES = {
         "ddgs>=0.1.0",
         "tavily-python>=0.3.0",
     ],
+    "TUI": [
+        "textual>=0.60.0",
+        "rich>=13.0.0",
+    ],
     "Opzionali": [
         "resemblyzer>=0.1.4",
-        "webrtcvad>=2.0.10",
-        "discord.py>=2.3.0",
         "speechbrain>=1.0.0",
+        "discord.py>=2.3.0",
+        "webrtcvad>=2.0.10",
     ],
 }
 
 def install_python_deps():
-    step(5, 8, "Dipendenze Python")
+    step(5, 9, "Dipendenze Python")
 
     pip = pip_cmd()
 
-    # Aggiorna pip
     info("Aggiorno pip...")
     run(pip + ["install", "--upgrade", "pip", "-q"], check=False)
+
+    # Installa torch con ROCm se disponibile, altrimenti CPU
+    print(f"\n   Torch (PyTorch):")
+    if ROCM_AVAILABLE and IS_LINUX:
+        print(f"      torch ROCm 6.1...", end=" ", flush=True)
+        r = run(pip + ["install", "torch", "--index-url",
+                       "https://download.pytorch.org/whl/rocm6.1", "-q"],
+                check=False, capture=True)
+        if r.returncode == 0:
+            print(f"{C.GREEN}OK (ROCm — GPU AMD){C.RESET}")
+        else:
+            print(f"{C.YELLOW}fallback CPU{C.RESET}")
+            run(pip + ["install", "torch", "-q"], check=False)
+    else:
+        print(f"      torch CPU...", end=" ", flush=True)
+        r = run(pip + ["install", "torch", "-q"], check=False, capture=True)
+        print(f"{C.GREEN}OK{C.RESET}" if r.returncode == 0 else f"{C.RED}ERRORE{C.RESET}")
 
     optional_groups = {"Opzionali"}
 
     for group, packages in PIP_PACKAGES.items():
         optional = group in optional_groups
-        print(f"\n   📦 {group}{' (opzionali)' if optional else ''}:")
+        print(f"\n   {group}{' (opzionali)' if optional else ''}:")
         for pkg in packages:
             name = pkg.split(">=")[0].split("==")[0]
             print(f"      {name}...", end=" ", flush=True)
             r = run(pip + ["install", pkg, "-q"], check=False, capture=True)
             if r.returncode == 0:
-                print(f"{C.GREEN}✅{C.RESET}")
+                print(f"{C.GREEN}OK{C.RESET}")
             elif optional:
-                print(f"{C.YELLOW}⚠️  (opzionale){C.RESET}")
+                print(f"{C.YELLOW}(opzionale){C.RESET}")
             else:
-                print(f"{C.RED}❌{C.RESET}")
-                warn(f"{name} obbligatorio — riprova manualmente: pip install {pkg}")
+                print(f"{C.RED}ERRORE{C.RESET}")
+                warn(f"{name} obbligatorio — riprova: pip install {pkg}")
 
 # ════════════════════════════════════════════════════════════════════════════
 # STEP 6 — Sposta file + patch OS-specific
@@ -593,9 +632,14 @@ def setup_env():
 
     keys = {
         "GROQ_API_KEY": {
-            "desc":     "Groq API Key — modello principale 120B (OBBLIGATORIO per AI cloud)",
+            "desc":     "Groq API Key — cervello principale 120B (OBBLIGATORIO per AI cloud)",
             "hint":     "Gratis su https://console.groq.com  →  API Keys  (inizia con gsk_...)",
             "optional": False,
+        },
+        "CEREBRAS_API_KEY": {
+            "desc":     "Cerebras — fallback Groq, llama 70B velocissimo (CONSIGLIATO)",
+            "hint":     "Gratis su https://cloud.cerebras.ai  →  API Keys",
+            "optional": True,
         },
         "NVIDIA_API_KEY": {
             "desc":     "NVIDIA NIM — Qwen 397B vision + task pesanti (CONSIGLIATO)",
@@ -694,12 +738,14 @@ def create_start_script():
         script.write_text(
             f'#!/bin/bash\n'
             f'cd "{DEST_DIR}"\n'
-            f'{hip_fix}\n'
+            f'# ROCm — AMD iGPU per SepFormer (speaker extraction)\n'
+            f'export HSA_OVERRIDE_GFX_VERSION=10.3.5\n'
+            f'export ROCR_VISIBLE_DEVICES=0\n'
             f'{activate}\n'
             f'if [ -f "{ENV_FILE}" ]; then\n'
             f'    {env_loader}\n'
             f'fi\n'
-            f'"{python}" jarvis_v8.py "$@"\n',
+            f'"{python}" jarvis_v9.py "$@"\n',
             encoding="utf-8"
         )
         os.chmod(script, 0o755)
@@ -761,16 +807,20 @@ def verify():
         ("numpy",          "import numpy"),
         ("faster_whisper", "from faster_whisper import WhisperModel"),
         ("sounddevice",    "import sounddevice"),
+        ("soundfile",      "import soundfile"),
+        ("scipy",          "import scipy"),
         ("gtts",           "from gtts import gTTS"),
         ("ddgs",           "from ddgs import DDGS"),
+        ("textual",        "import textual"),
+        ("chromadb",       "import chromadb"),
     ]
     optional = [
-        ("resemblyzer",  "from resemblyzer import VoiceEncoder"),
-        ("webrtcvad",    "import webrtcvad"),
-        ("speechbrain",  "import speechbrain"),
-        ("discord",      "import discord"),
-        ("tavily",       "from tavily import TavilyClient"),
-        ("noisereduce",  "import noisereduce"),
+        ("torch",          "import torch"),
+        ("resemblyzer",    "from resemblyzer import VoiceEncoder"),
+        ("speechbrain",    "import speechbrain"),
+        ("noisereduce",    "import noisereduce"),
+        ("discord",        "import discord"),
+        ("tavily",         "from tavily import TavilyClient"),
     ]
 
     all_ok = True
@@ -826,11 +876,11 @@ def print_summary(success):
 # ════════════════════════════════════════════════════════════════════════════
 
 def main():
-    print("═" * 54)
-    print(f"{C.BOLD}{C.CYAN}🤖 JARVIS v8.0 — Installer{C.RESET}")
+    print("=" * 54)
+    print(f"{C.BOLD}{C.CYAN}JARVIS v9.0 — Installer{C.RESET}")
     print(f"   Sistema: {OS} {platform.release()}")
     print(f"   Python:  {sys.executable}")
-    print("═" * 54)
+    print("=" * 54)
 
     try:
         check_system()
