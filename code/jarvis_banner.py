@@ -83,6 +83,29 @@ _EYES = [
      r"                ║  █ ╚──╝   ╚──╝ █  ║"),
 ]
 
+# ── Arc reactor pulsante (frame animati) ──────────────────────────────────────
+# Il core cambia carattere e gli anelli "respirano" col frame.
+_ARC_FRAMES = [
+    ["    ╭───╮    ", "   ╱ ◦◦◦ ╲   ", "  │ ◦ ● ◦ │  ", "   ╲ ◦◦◦ ╱   ", "    ╰───╯    "],
+    ["    ╭───╮    ", "   ╱ ∘∘∘ ╲   ", "  │ ∘ ◉ ∘ │  ", "   ╲ ∘∘∘ ╱   ", "    ╰───╯    "],
+    ["   ╭─────╮   ", "  ╱ ·  ·  ╲  ", "  │ · ◎ · │  ", "  ╲ ·  ·  ╱  ", "   ╰─────╯   "],
+    ["    ╭───╮    ", "   ╱ ∘∘∘ ╲   ", "  │ ∘ ◉ ∘ │  ", "   ╲ ∘∘∘ ╱   ", "    ╰───╯    "],
+]
+
+# ── Waveform reattivo (livelli barre) ─────────────────────────────────────────
+# Caratteri di altezza crescente. In idle ondeggia piano; quando parla, alto.
+_WAVE_CHARS = " ▁▂▃▄▅▆▇█"
+
+# ── Quote a tema che ruotano ──────────────────────────────────────────────────
+_QUOTES = [
+    "At your service, sir.",
+    "All systems operational.",
+    "Standing by.",
+    "Ready when you are.",
+    "Listening...",
+    "Online and attentive.",
+]
+
 _CMD_MENU = {
     "it": [
         "/memorizza <fatto>   /memoria   /dimentica",
@@ -151,6 +174,69 @@ def _get_ram():
     except Exception: return "n/d"
 
 _CPU = None
+def _ram_pct() -> float:
+    """Percentuale RAM usata (0..1)."""
+    try:
+        with open("/proc/meminfo") as f: lines = f.readlines()
+        total = avail = 0
+        for l in lines:
+            if l.startswith("MemTotal"):      total = int(l.split()[1])
+            elif l.startswith("MemAvailable"): avail = int(l.split()[1])
+        return (total - avail) / total if total else 0.0
+    except Exception:
+        return 0.0
+
+def _bar(pct: float, width: int = 12) -> str:
+    """Mini barra ASCII colorata in stile HUD. pct 0..1."""
+    filled = int(round(pct * width))
+    filled = max(0, min(width, filled))
+    color = "green" if pct < 0.6 else ("yellow" if pct < 0.85 else "red")
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{color}]{bar}[/{color}] {int(pct*100)}%"
+
+_CPU_LAST = {"idle": 0, "total": 0}
+def _cpu_pct() -> float:
+    """Percentuale CPU usata (0..1), delta tra due letture di /proc/stat."""
+    try:
+        with open("/proc/stat") as f:
+            vals = list(map(int, f.readline().split()[1:]))
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        total = sum(vals)
+        d_idle = idle - _CPU_LAST["idle"]; d_total = total - _CPU_LAST["total"]
+        _CPU_LAST["idle"] = idle; _CPU_LAST["total"] = total
+        if d_total <= 0: return 0.0
+        return max(0.0, min(1.0, 1 - d_idle / d_total))
+    except Exception:
+        return 0.0
+
+_GPU_AVAIL = None
+def _gpu_pct() -> float:
+    """Percentuale GPU (0..1). AMD via sysfs, NVIDIA via nvidia-smi. -1 se assente."""
+    global _GPU_AVAIL
+    try:
+        import glob
+        for p in glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"):
+            with open(p) as f:
+                _GPU_AVAIL = True
+                return max(0.0, min(1.0, int(f.read().strip()) / 100))
+    except Exception:
+        pass
+    if _GPU_AVAIL is not False:
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=1,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                _GPU_AVAIL = True
+                return max(0.0, min(1.0, int(r.stdout.strip().split("\n")[0]) / 100))
+        except Exception:
+            pass
+    _GPU_AVAIL = False
+    return -1.0
+
 def _get_cpu():
     global _CPU
     if _CPU: return _CPU
@@ -185,18 +271,44 @@ def _get_os():
 # ── Builder markup Rich (Zona A) ─────────────────────────────────────────────
 def _ok(flag): return "[green]attivo[/green]" if flag else "[red]offline[/red]"
 
+def _build_waveform(level: float, frame: int, width: int = 28) -> str:
+    """Costruisce una riga di waveform ASCII.
+    level 0..1 = ampiezza (volume reale del microfono se collegato).
+    frame      = per l'ondeggiamento animato.
+    """
+    import math
+    chars = _WAVE_CHARS
+    out = []
+    base = max(0.05, level)
+    for i in range(width):
+        # onda sinusoidale sfasata + ampiezza dal livello → barre vive
+        phase = math.sin((i * 0.6) + (frame * 0.5)) * 0.5 + 0.5
+        h = base * phase
+        idx = min(len(chars) - 1, int(h * (len(chars) - 1)))
+        out.append(chars[idx])
+    return "".join(out)
+
 def _build_banner_markup(
     eye_frame=0, model="jarvisQwen", tts_on=False, discord_on=False,
     memory_count=0, search_ok=False, ollama_ok=True, speaker_ok=False,
     lang="it", search_engines="", tokens="0",
+    anim_frame=0, audio_level=0.0, speaking=False,
 ) -> str:
     user = os.getenv("USER","user"); hostname = platform.node()
     ora  = datetime.datetime.now().strftime("%H:%M")
     sep  = "─"*(len(user)+len(hostname)+1)
+    # Barre di carico: CPU sempre, GPU solo se leggibile, RAM sempre.
+    gpu = _gpu_pct()
+    load_rows = [("CPU", _bar(_cpu_pct()))]
+    if gpu >= 0:
+        load_rows.append(("GPU", _bar(gpu)))
+    load_rows.append(("RAM", _bar(_ram_pct())))
+
     info = [
         (f"[bold]{user}[/bold][dim]@[/dim][bold]{hostname}[/bold]", ""),
         ("", sep), ("OS", _get_os()), ("Kernel", _get_kernel()),
-        ("CPU", _get_cpu()), ("RAM", _get_ram()), ("Uptime", _get_uptime()), ("",""),
+        ("Uptime", _get_uptime()),
+        *load_rows,
         ("Modello", f"[cyan]{model}[/cyan]"), ("Lingua", lang.upper()),
         ("Ollama", _ok(ollama_ok)), ("TTS", _ok(tts_on)), ("Discord", _ok(discord_on)),
         ("Ricerca", _ok(search_ok)+(f" [dim]({search_engines})[/dim]" if search_engines else "")),
@@ -211,7 +323,10 @@ def _build_banner_markup(
             s = f"  [yellow]{k:<8}[/yellow] {v}" if (k and k!=sep) else (f"  {v}" if v else "")
         lines.append(f"[cyan]{ll}[/cyan]{pad}{s}")
     eyes=_EYES[eye_frame%len(_EYES)]
-    for j,frow in enumerate([_FACE_PRE,_FACE_TOP,eyes[0],eyes[1],eyes[2],_FACE_BOT,_FACE_CHIN,_FACE_CLOS]):
+    # Arc reactor animato accanto alla faccina (a destra del volto)
+    arc = _ARC_FRAMES[anim_frame % len(_ARC_FRAMES)]
+    face_rows = [_FACE_PRE,_FACE_TOP,eyes[0],eyes[1],eyes[2],_FACE_BOT,_FACE_CHIN,_FACE_CLOS]
+    for j,frow in enumerate(face_rows):
         pad=" "*max(0,logo_w-len(frow)); s=""
         ii=len(_LOGO_TOP)+j
         if ii<len(info):
@@ -219,6 +334,23 @@ def _build_banner_markup(
             s = f"  [yellow]{k:<8}[/yellow] {v}" if (k and k!=sep) else (f"  {v}" if v else "")
         lines.append(f"[red]{frow}[/red]{pad}{s}")
     lines.append("")
+
+    # ── Arc reactor + waveform reattivo ───────────────────────────────────────
+    arc_color = "[bold cyan]" if speaking else "[cyan]"
+    for arow in arc:
+        lines.append(f"{arc_color}                    {arow}[/]")
+    # Stato + waveform: pieno quando parla/ascolta, ondeggia piano in idle
+    lvl = audio_level if (speaking or audio_level > 0.05) else 0.18
+    wave = _build_waveform(lvl, anim_frame)
+    state_lbl = "◦ SPEAKING ◦" if speaking else ("◦ LISTENING ◦" if audio_level > 0.05 else "◦ IDLE ◦")
+    wcolor = "[bold cyan]" if (speaking or audio_level > 0.05) else "[dim cyan]"
+    lines.append(f"              [dim]{state_lbl}[/dim]")
+    lines.append(f"        {wcolor}{wave}[/]")
+    # Quote rotante (cambia ogni ~8 frame)
+    quote = _QUOTES[(anim_frame // 8) % len(_QUOTES)]
+    lines.append(f"        [dim italic]\"{quote}\"[/dim italic]")
+    lines.append("")
+
     sep52="═"*52; sep52b="─"*52
     ready=_READY_MSG.get(lang,_READY_MSG["en"]); menu=_CMD_MENU.get(lang,_CMD_MENU["en"])
     lines += [f"[yellow]{sep52}[/yellow]", f"[bold]  {ready}[/bold]", sep52b]
@@ -266,8 +398,21 @@ if TEXTUAL_OK:
                 eye = 2 + (frame % 2)
             else:
                 self._idle_tick += 1
-                eye = 1 if (self._idle_tick % 4 == 0) else 0
-            self.update(_build_banner_markup(eye_frame=eye, **self._params()))
+                eye = 1 if (self._idle_tick % 8 == 0) else 0
+            # Livello audio reale del microfono se collegato (0..1), altrimenti 0
+            level = 0.0
+            try:
+                getter = getattr(self._bot, "_audio_level", None)
+                if callable(getter):
+                    level = float(getter())
+                elif getter is not None:
+                    level = float(getter)
+            except Exception:
+                level = 0.0
+            self.update(_build_banner_markup(
+                eye_frame=eye, anim_frame=frame, audio_level=level,
+                speaking=speaking, **self._params()
+            ))
 
         def set_lang(self, _: str):
             with self._lock: self._frame = 0
@@ -326,7 +471,7 @@ if TEXTUAL_OK:
             yield self._ibox
 
         def on_mount(self):
-            self.set_interval(0.4,  self._anim_tick)
+            self.set_interval(0.2,  self._anim_tick)
             self.set_interval(0.05, self._drain_queue)
             if self._ibox: self._ibox.focus()
             # Segnala al worker che l'app è pronta
