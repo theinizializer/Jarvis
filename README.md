@@ -1,59 +1,68 @@
-# 🤖 JARVIS v8.0
+# 🤖 JARVIS v9.0
 
-> Local personal AI assistant — voice, web search, Discord, persistent memory with ChromaDB.  
-> Runs **completely offline** on your machine. No data sent to external servers (except optional web searches).
+> Assistente AI personale — voce, ricerca web, Discord, memoria persistente con ChromaDB.
+> Funziona in locale sulla tua macchina, con fallback cloud opzionali per velocità.
 
 ---
 
-## ✨ Features
+## ✨ Funzionalità
 
-| Feature | Description |
+| Funzionalità | Descrizione |
 |---------|-------------|
-| 💬 **Text & Voice** | Keyboard or microphone — your choice |
-| 🎙️ **Wake Word** | Say "Jarvis" to activate — fuzzy matching for accents |
-| 😴 **Sleep Word** | "Jarvis dormi/sleep/dors" — closes session |
-| 🔒 **Speaker Verification** | JARVIS responds only to your voice |
-| 🔊 **TTS** | Text-to-speech with automatic microphone mute |
-| 🧠 **Memory Engine** | SQLite + ChromaDB — semantic search + persistent facts |
-| 💻 **Terminal Commands** | Run shell commands with confirmation |
-| 🌍 **16 Languages** | IT, FR, EN, DE, ES, PT, ZH, JA, KO, AR, RU, NL, PL, TR, SV, LB |
-| 🔍 **Web Search** | Tavily + Brave + SearXNG + DDG + Wikipedia |
-| 💙 **Discord Bot** | Use JARVIS directly from Discord |
-| 🤖 **Agent Mode** | Autonomous task execution with reasoning |
-| 🖥️ **SSH Module** | Execute commands on remote servers |
+| 💬 **Testo & Voce** | Tastiera o microfono — a tua scelta |
+| 🎙️ **Wake Word** | Di' "Jarvis" per attivare — fuzzy matching per accenti |
+| 😴 **Sleep Word** | "Jarvis dormi/sleep/dors" — chiude la sessione |
+| 🔒 **Speaker Verification** | JARVIS risponde solo alla tua voce (ECAPA-TDNN) |
+| 🔊 **TTS** | Sintesi vocale con mute automatico del microfono |
+| 🧠 **Memory Engine** | SQLite + ChromaDB — ricerca semantica + fatti persistenti |
+| 💻 **Comandi Terminale** | Esegue comandi shell con conferma per quelli rischiosi |
+| 🌍 **Multilingua** | UI tradotta in IT, FR, EN, PT; voce/wake word per più lingue |
+| 🔍 **Ricerca Web** | Tavily + Brave + SearXNG + DuckDuckGo + Wikipedia |
+| 💙 **Bot Discord** | Usa JARVIS direttamente da Discord (accesso remoto) |
+| 🤖 **Modalità Agente** | Esecuzione autonoma di task con ragionamento |
+| 🖥️ **Modulo SSH** | Esegue comandi su server remoti (credenziali cifrate) |
+| 🔐 **Sicurezza** | PIN di sessione + password sudo cifrate (Fernet) |
+| 🧩 **Multi-provider** | Groq → Cerebras → NVIDIA → Ollama, con fallback automatico |
 
 ---
 
-## 📁 Project Structure
+## 📁 Struttura del progetto
 
 ```
 code/
-  ├── jarvis_v8.py              ← main core: Ollama, memory, terminal, Discord
-  ├── jarvis_memory_engine.py   ← SQLite + ChromaDB semantic memory
-  ├── voice_module.py           ← STT (Whisper), TTS (gTTS), wake word, speaker verification
-  ├── search_module.py          ← web search backends with fallback chain
-  ├── language_module.py        ← localization for 16 languages
-  ├── agent_module.py           ← autonomous agent with reasoning
-  ├── jarvis_banner.py          ← live UI banner
-  ├── jarvis_secrets.py         ← PIN + encrypted secrets management
-  ├── ssh_module.py             ← remote SSH execution
-  ├── installer.py              ← automatic cross-platform setup
-  └── Modelfile                 ← Ollama model configuration
-docker-compose.yml             ← SearXNG local search engine
-README.md                       ← this file
+  ├── jarvis_v9.py              ← core principale: orchestratore, memoria, terminale
+  ├── api_module.py             ← provider LLM (Groq, Cerebras, NVIDIA, Ollama)
+  ├── commands_module.py        ← comandi slash (/tts, /setpin, /token, /dormi…)
+  ├── discord_module.py         ← integrazione Discord
+  ├── utils_module.py           ← costanti, regex, run_cmd, gestione cleanup
+  ├── jarvis_memory_engine.py   ← memoria semantica SQLite + ChromaDB
+  ├── voice_module.py           ← STT (Whisper), TTS, wake word, speaker verification
+  ├── search_module.py          ← backend ricerca web con catena di fallback
+  ├── language_module.py        ← localizzazione e messaggi tradotti
+  ├── agent_module.py           ← agente autonomo con ragionamento
+  ├── blender_module.py         ← integrazione Blender (sperimentale)
+  ├── sepformer_server.py       ← server separazione voci (socket Unix)
+  ├── jarvis_banner.py          ← UI live (TUI Textual)
+  ├── jarvis_secrets.py         ← gestione segreti cifrati (PIN, sudo)
+  ├── ssh_module.py             ← esecuzione SSH remota
+  ├── persona_module.py         ← personalità di JARVIS
+  ├── installer.py              ← setup automatico cross-platform
+  └── Modelfile                 ← configurazione modello Ollama
+docker-compose.yml             ← motore di ricerca SearXNG locale
+README.md                       ← questo file
 ```
 
 ---
 
-## 🚀 Installation
+## 🚀 Installazione
 
-### Requirements
+### Requisiti
 
 - Python 3.10+
-- [Ollama](https://ollama.com) — local AI model
-- Linux/macOS/Windows supported
+- [Ollama](https://ollama.com) — modello AI locale (per il fallback offline)
+- Linux / macOS / Windows
 
-### Quick Start (Automatic)
+### Avvio rapido (automatico)
 
 ```bash
 git clone https://github.com/theinizializer/Jarvis.git
@@ -61,231 +70,183 @@ cd Jarvis-main/code
 python installer.py
 ```
 
-The installer will:
-1. ✅ Detect your OS
-2. ✅ Install Ollama automatically
-3. ✅ Install system dependencies (audio, portaudio)
-4. ✅ Create Python venv (Linux only)
-5. ✅ Install all Python packages
-6. ✅ Copy files to ~/Documents/modelli
-7. ✅ Configure .env with API keys
-8. ✅ Create startup scripts
-9. ✅ Download Ollama models
+L'installer si occupa di rilevare il sistema operativo, installare Ollama e le dipendenze di sistema (audio, portaudio), creare il virtualenv Python, installare i pacchetti, copiare i file nella cartella di destinazione, configurare il `.env` con le API key, impostare PIN e password sudo cifrati, creare gli script di avvio e scaricare il modello Ollama.
 
-### Manual Setup
+### Setup manuale
 
 ```bash
-# Install Ollama from https://ollama.com
-# Pull base model
+# Installa Ollama da https://ollama.com
 ollama pull qwen2.5:7b
-
-# Create JARVIS model
 ollama create jarvisQwen -f Modelfile
 
-# Install dependencies
 pip install -r requirements.txt
-
-# Start JARVIS
-python jarvis_v8.py
+python jarvis_v9.py
 ```
 
 ---
 
-## 🔍 Web Search Setup
+## 🧩 Provider AI (fallback automatico)
 
-JARVIS uses a fallback chain — configure what you have, skip the rest.
+JARVIS prova i provider in cascata: se uno non è disponibile o esaurisce la quota, passa al successivo, fino al modello locale Ollama che funziona sempre offline.
 
-| Backend | Type | Setup |
+1. **Groq** — principale, veloce (`GROQ_API_KEY`) — https://console.groq.com
+2. **Cerebras** — fallback veloce (`CEREBRAS_API_KEY`) — https://cloud.cerebras.ai
+3. **NVIDIA NIM** — task pesanti e vision (`NVIDIA_API_KEY`) — https://build.nvidia.com
+4. **Ollama** — locale, privacy totale, nessuna chiave necessaria
+
+Puoi forzare un provider a runtime con `/provider groq|nvidia|ollama`.
+
+> Il consumo di token per ogni provider è visibile nel banner e con il comando `/token`.
+
+---
+
+## 🔍 Ricerca web
+
+JARVIS usa una catena di fallback — configura quello che hai, salta il resto.
+
+| Backend | Tipo | Setup |
 |---------|------|-------|
-| **Tavily** | API, 1000 req/month free | [tavily.com](https://tavily.com) → `TAVILY_API_KEY` in `.env` |
-| **SearXNG** ⭐ | Self-hosted, unlimited | `docker compose up -d` |
-| **Brave** | API, 2000 req/month free | [brave search](https://api.search.brave.com) → `BRAVE_API_KEY` in `.env` |
-| **DuckDuckGo** | Free, no key | Automatic fallback |
-| **Wikipedia** | Free, no key | Always available |
-| **Open-Meteo** | Free, no key | Weather forecasts |
+| **Tavily** | API, 1000 req/mese gratis | `TAVILY_API_KEY` nel `.env` |
+| **SearXNG** ⭐ | Self-hosted, illimitato | `docker compose up -d` |
+| **Brave** | API, 2000 req/mese gratis | `BRAVE_API_KEY` nel `.env` |
+| **DuckDuckGo** | Gratis, nessuna chiave | Fallback automatico |
+| **Wikipedia** | Gratis, nessuna chiave | Sempre disponibile |
+| **Open-Meteo** | Gratis, nessuna chiave | Previsioni meteo |
+
+---
+
+## 🔐 Sicurezza
+
+JARVIS ha accesso al sistema (comandi shell, sudo, SSH remoto), quindi include protezioni:
+
+- **PIN di sessione** — richiesto all'avvio in modalità tastiera e dopo `/dormi`. Impostalo o cambialo a caldo con `/setpin`, senza reinstallare.
+- **Password sudo cifrata** — salvata in `.env.enc` con Fernet (AES), legata alla macchina. Non viene mai mostrata a schermo né salvata in chiaro.
+- **Credenziali SSH cifrate** — le password degli host remoti sono cifrate a riposo.
+- **Conferma comandi rischiosi** — il guardiano blocca/chiede conferma per comandi distruttivi.
+
+I segreti cifrati (`.env.enc`) sono separati dalle API key (`.env`): i due file non si sovrascrivono.
+
+---
+
+## 🧠 Memoria
+
+Memoria semantica con ChromaDB, persistente tra le sessioni:
 
 ```bash
-# Start SearXNG locally (recommended)
-docker compose up -d
+/memorizza Il mio nome è Radostin
+/memoria          # mostra le memorie (ricerca semantica)
+/dimentica        # cancella la memoria
 ```
 
 ---
 
-## 🧠 Memory Engine (NEW in v8.0)
+## 💬 Comandi (slash)
 
-JARVIS now has **semantic memory** powered by ChromaDB:
+Tutti i comandi iniziano con `/` — funzionano sia da tastiera sia a voce.
 
-```python
-# Automatically saved between sessions
-/memorizza Il mio nome è radostin
-/memorizza Lavoro come programmatore a Lussemburgo
-/memoria  # Shows all memories with semantic search
-/dimentica tutto  # Clear all memories
-```
-
----
-
-## 🌍 Languages
-
-Supports 16 languages — everything adapts: wake word, sleep word, commands, TTS, UI messages.
-
-```
-🇮🇹 Italiano  🇫🇷 Français  🇬🇧 English   🇩🇪 Deutsch
-🇪🇸 Español   🇵🇹 Português  🇨🇳 中文       🇯🇵 日本語
-🇰🇷 한국어     🇸🇦 العربية    🇷🇺 Русский    🇳🇱 Nederlands
-🇵🇱 Polski    🇹🇷 Türkçe     🇸🇪 Svenska    🇱🇺 Lëtzebuergesch
-```
-
----
-
-## 💬 Commands (slash)
-
-All commands use `/` — works in both keyboard and voice mode.
-
-| Command | Description |
+| Comando | Descrizione |
 |---------|-------------|
-| `/remember <fact>` | Save to persistent memory |
-| `/memory` | Show everything remembered |
-| `/forget all` | Clear all memory |
-| `/language` | Show current language |
-| `/change language` | Switch language |
-| `/weather <city>` | Weather forecast |
-| `/news` | Latest news |
-| `/wiki <topic>` | Wikipedia search |
-| `/tts` | Toggle voice on/off |
-| `/provider groq\|nvidia\|ollama` | Switch AI provider |
-| `/agent <goal>` | Autonomous agent mode |
-| `/add_voice` | Record voice profile (8-10 seconds) |
-| `/voice_profiles` | Manage voice profiles |
-| `/host list` | Show SSH hosts |
-| `/host add` | Add new SSH host |
-| `/host <name>` | Connect to SSH host |
-| `/stats` | Session statistics |
-| `/log` | Show command history |
-| `/help` | Show all available commands |
-| `/exit` | Close JARVIS |
+| `/memorizza <fatto>` | Salva nella memoria persistente |
+| `/memoria` | Mostra tutto ciò che è memorizzato |
+| `/dimentica` | Cancella la memoria |
+| `/lingua` | Mostra la lingua corrente |
+| `/cambia_lingua` | Cambia lingua (a caldo, senza riavviare) |
+| `/meteo <città>` | Previsioni meteo |
+| `/notizie` | Ultime notizie |
+| `/wiki <argomento>` | Ricerca Wikipedia |
+| `/tts` | Attiva/disattiva la voce |
+| `/provider groq\|nvidia\|ollama` | Cambia provider AI |
+| `/agente <obiettivo>` | Modalità agente autonomo |
+| `/aggiungi_voce` | Registra profilo vocale (10-15 secondi) |
+| `/profili_voce` | Gestisci profili vocali |
+| `/host` | Gestione host SSH |
+| `/stats` | Statistiche sessione |
+| `/token` | Consumo token per provider |
+| `/setpin` | Imposta o cambia il PIN di sessione |
+| `/dormi` | Standby (blocca con PIN) |
+| `/esci` | Chiudi JARVIS |
+| `/aiuto` | Mostra tutti i comandi disponibili |
 
-> **Note**: Commands are **fully localized** in all 16 languages — just use the English version or your language equivalent!
+> Le descrizioni dei comandi e i messaggi principali sono tradotti in IT/FR/EN/PT e cambiano a caldo con `/cambia_lingua`.
 
 ---
 
-## 🤖 Multiple AI Providers (NEW in v8.0)
+## 🔒 Speaker Verification
 
-Choose your brain at runtime:
+JARVIS può imparare la tua voce e ignorare gli altri. Usa **ECAPA-TDNN** (SpeechBrain) per un riconoscimento accurato.
 
 ```bash
-/provider groq      # Groq API (120B — fastest)
-/provider nvidia    # NVIDIA NIM (Qwen 397B — vision + reasoning)
-/provider ollama    # Local Ollama (privacy-first)
+# Registra il profilo vocale (parla 10-15 secondi, con frasi varie)
+# dall'interno di JARVIS:
+/aggiungi_voce
 ```
 
-**Groq API** (recommended for speed):
-1. Get free API key: https://console.groq.com
-2. Set `GROQ_API_KEY` in `.env`
-3. JARVIS auto-switches if internet available
-
-**NVIDIA NIM** (recommended for vision + complex tasks):
-1. Get free API key: https://build.nvidia.com
-2. Set `NVIDIA_API_KEY` in `.env`
-3. Use for vision, debugging, code review
-
-**Local Ollama** (recommended for privacy):
-- No API keys needed
-- Runs 100% offline
-- Slower but completely private
+Per buoni risultati: registra nello stesso ambiente e con lo stesso microfono che userai normalmente. I profili sono separati per motore (ECAPA/Resemblyzer) e non si mischiano.
 
 ---
 
-## 🔒 Speaker Verification (optional)
+## 🔑 Configurazione `.env`
 
-JARVIS can learn your voice and ignore everyone else — including itself.
-
-```bash
-# Set up voice profile (speak for 10 seconds)
-cd ~/Documents/modelli
-python voice_module.py --setup-speaker
-```
-
-On AMD GPUs, always set `HIP_VISIBLE_DEVICES=-1` to force CPU mode for resemblyzer.
-
----
-
-## 🔑 API Keys (.env)
+Formato: `CHIAVE=valore` — **senza spazi attorno all'`=` e senza virgolette**.
 
 ```env
-GROQ_API_KEY=gsk_...           # Groq API (optional — use /provider ollama if not set)
-NVIDIA_API_KEY=nvapi-...       # NVIDIA NIM (optional — vision + reasoning)
-TAVILY_API_KEY=tvly-...        # Tavily Search (optional)
-BRAVE_API_KEY=...              # Brave Search (optional)
-GNEWS_API_KEY=...              # GNews (optional)
-DISCORD_TOKEN=...              # Discord bot (optional)
-SUDO_PASSWORD=...              # Sudo password (optional — ask on first run)
+GROQ_API_KEY=gsk_...           # Groq (opzionale — fallback su Ollama se assente)
+CEREBRAS_API_KEY=csk-...       # Cerebras (opzionale — fallback di Groq)
+NVIDIA_API_KEY=nvapi-...       # NVIDIA NIM (opzionale — vision + task pesanti)
+TAVILY_API_KEY=tvly-...        # Tavily Search (opzionale)
+BRAVE_API_KEY=...              # Brave Search (opzionale)
+GNEWS_API_KEY=...              # GNews (opzionale)
+DISCORD_TOKEN=...              # Bot Discord (opzionale)
+
+# Sorgenti — PC = localhost, Raspberry = IP del PC sulla rete locale
+OLLAMA_HOST=localhost
+OLLAMA_PORT=11434
+WHISPER_MODEL=medium           # medium (PC) | base | tiny (Raspberry, più veloce)
 ```
+
+> La password sudo e il PIN **non** vanno nel `.env`: sono gestiti cifrati nel `.env.enc` (vedi sezione Sicurezza).
 
 ---
 
 ## 🛠️ Troubleshooting
 
-**`PaErrorCode -9997` — Invalid sample rate**  
-Your microphone uses a different sample rate. JARVIS auto-detects it, but if it fails:
+**Il microfono non sente**
+Spesso è la sorgente audio sbagliata (es. auricolari Bluetooth che rubano il microfono di default). Verifica i dispositivi e scegli quello giusto nel menu microfoni di JARVIS:
 ```bash
-python3 -c "import sounddevice as sd; print(sd.query_devices(kind='input'))"
+arecord -l                 # elenca i dispositivi di cattura
+wpctl status               # (PipeWire) controlla la sorgente di default
 ```
 
-**`HIP error` on AMD GPU**  
-resemblyzer tries to use the AMD GPU. Force CPU:
+**Whisper non trascrive / si blocca all'avvio in modalità vocale**
+Probabilmente il modello Whisper manca dalla cache. Scaricalo:
 ```bash
-HIP_VISIBLE_DEVICES=-1 python jarvis_v8.py
+python -c "from faster_whisper import WhisperModel; WhisperModel('medium', device='cpu', compute_type='int8')"
 ```
+Oppure usa un modello più piccolo impostando `WHISPER_MODEL=base` nel `.env`.
 
-**Whisper not transcribing / hallucinating**  
-Try a larger model — edit `WHISPER_MODEL_SIZE` in `voice_module.py`:
-```python
-WHISPER_MODEL_SIZE = "medium"  # or "large-v3" for best accuracy
-```
+**Cerebras risponde con errore / cade su Ollama**
+Verifica che `CEREBRAS_API_KEY` nel `.env` sia corretta e **senza virgolette**. Il modello usato è `gpt-oss-120b` (i vecchi modelli Llama sono deprecati).
 
-**JARVIS hears itself speaking**  
-Use headphones/earphones — the microphone won't pick up the speaker output.  
-Or set up speaker verification so JARVIS ignores its own voice.
+**JARVIS sente sé stesso parlare**
+Usa cuffie/auricolari, oppure registra un profilo vocale così JARVIS ignora la propria voce.
 
-**`parecord: command not found`**  
+**TTS non funziona**
 ```bash
-sudo apt install pulseaudio-utils
-```
-
-**TTS not working**  
-```bash
-sudo apt install mpg123
-which mpg123  # should print /usr/bin/mpg123
+sudo apt install mpg123    # o l'equivalente per la tua distro
 ```
 
 ---
 
-## 📊 Model Benchmarks
+## 🤝 Contribuire
 
-| Model | Type | Speed | Accuracy | Vision | Cost |
-|-------|------|-------|----------|--------|------|
-| Groq 120B | Cloud | ⚡⚡⚡ | ⭐⭐⭐⭐ | No | Free tier |
-| NVIDIA Qwen 397B | Cloud | ⚡⚡ | ⭐⭐⭐⭐⭐ | Yes | Free tier |
-| Ollama Qwen 7B | Local | ⚡ | ⭐⭐⭐ | No | Free |
+PR e issue benvenute. Se aggiungi una lingua, un backend di ricerca o una funzionalità, apri una PR.
 
 ---
 
-## 🤝 Contributing
+## 📄 Licenza
 
-PRs and issues welcome! If you add a language, search backend, or feature — open a PR.
-
-1. Fork the repo
-2. Create a branch: `git checkout -b feature/my-feature`
-3. Commit and push
-4. Open a Pull Request
+MIT License — vedi [LICENSE](LICENSE)
 
 ---
 
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE)
-
----
-
-*Inspired by Iron Man's JARVIS. Built by a student from Luxembourg 🇱🇺 as a passion project.*
+*Ispirato al JARVIS di Iron Man. Costruito da uno studente in Lussemburgo 🇱🇺 come progetto personale.*
