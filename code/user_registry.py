@@ -1,22 +1,34 @@
 #!/usr/bin/env python3
 """
-JARVIS — user_registry.py
-=========================
-La spina dorsale dell'identita'. Regola unica:
-    UNA persona = un NOME unico + un RUOLO + UN solo PIN (hashato, non cifrato).
+JARVIS — user_registry.py  (versione completa)
+==============================================
+Identità del sistema. Regole stabilite nella progettazione:
 
-Principi che reggono tutto il resto della conversazione:
-  - La VOCE dice CHI sei (personalizzazione), non cosa puoi fare.
-  - Il PIN IDENTIFICA e AUTORIZZA: identify_by_pin() dato un PIN ritorna la
-    persona e il suo ruolo. Non sei tu (ne' la voce, ne' il modello) a
-    dichiarare "sono admin" — lo determina il PIN che possiedi.
-  - Il guardiano applica; questo file e' solo il registro.
+  - UN solo admin, con il PIN che SCEGLIE lui. Impossibile averne due
+    (init_admin rifiuta se esiste già).
+  - I secondari ("gli intrusi che l'admin tollera") hanno PIN ALFANUMERICI
+    GENERATI dal sistema (secrets) — nessuno li sceglie, quindi niente collisioni
+    da gestire e niente messaggio "PIN già in uso" da cui dedurre qualcosa.
+  - L'identità è una CHIAVE interna unica (marco, marco2…), NON il nome mostrato.
+    Due "Marco" diversi hanno chiavi diverse ma possono mostrare la stessa etichetta.
+  - Il PIN identifica e autorizza; il potere admin è legato alla CHIAVE admin,
+    non al "primo PIN che combacia" -> una collisione non promuove nessuno.
 
-Dipendenze: pin_auth.py (hash_pin / verify_pin). Niente altro -> testabile da solo.
+Matrice dei PIN (decisa insieme):
+  - crea persona nuova        -> PIN admin (poi il sistema genera il PIN della persona)
+  - stessa persona, +lingua   -> PIN admin + PIN della persona (presente al microfono)
+  - stessa persona, rifà lingua-> PIN admin + PIN della persona
+  - admin rifà la SUA voce    -> solo PIN admin (è già lui)
+  - elimina voce/account      -> solo PIN admin (il proprietario decide)
+  - l'IDENTITÀ admin non si elimina MAI (non ti chiudi fuori)
+
+Dipendenze: pin_auth.py. Testabile da solo (audio iniettato come dipendenza).
 """
 
 import json
 import os
+import re
+import secrets
 import threading
 from pathlib import Path
 
@@ -24,24 +36,36 @@ from pin_auth import hash_pin, verify_pin
 
 _LOCK = threading.Lock()
 
+# Alfabeto PIN: maiuscole + cifre, senza caratteri ambigui (no O/0/I/1/L) —
+# così si leggono ad alta voce senza confusione.
+_PIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
 
 class UserRegistry:
     def __init__(self, path=None):
         self._path = Path(path) if path else Path(__file__).parent / "users.json"
-        self._users = {}   # nome -> {"role": "admin"|"secondary", "pin_hash": str}
+        self._users = {}   # key -> {"display": str, "role": str, "pin_hash": str}
         self._load()
 
     # ── persistenza ───────────────────────────────────────────────────────────
     def _load(self):
-        if self._path.exists():
-            try:
-                self._users = json.loads(self._path.read_text(encoding="utf-8"))
-            except Exception:
-                self._users = {}
+        if not self._path.exists():
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except Exception:
+            self._users = {}
+            return
+        # Migrazione dal vecchio formato {nome: {role, pin_hash}} -> aggiunge display.
+        for k, u in raw.items():
+            if "display" not in u:
+                u["display"] = k
+        self._users = raw
 
     def _save(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._users, indent=2), encoding="utf-8")
+        self._path.write_text(json.dumps(self._users, indent=2, ensure_ascii=False),
+                              encoding="utf-8")
         try:
             os.chmod(self._path, 0o600)   # solo il proprietario legge gli hash
         except OSError:
@@ -49,231 +73,315 @@ class UserRegistry:
 
     # ── helper ──────────────────────────────────────────────────────────────--
     @staticmethod
-    def _norm(name):
-        return (name or "").strip().lower()
+    def _slug(text):
+        s = re.sub(r"[^a-z0-9]+", "_", (text or "").strip().lower()).strip("_")
+        return s or "utente"
 
-    def exists(self, name):
-        return self._norm(name) in self._users
+    def _unique_key(self, display):
+        base = self._slug(display)
+        if base not in self._users:
+            return base
+        i = 2
+        while f"{base}{i}" in self._users:
+            i += 1
+        return f"{base}{i}"
 
-    def role_of(self, name):
-        u = self._users.get(self._norm(name))
+    def exists(self, key):
+        return key in self._users
+
+    def role_of(self, key):
+        u = self._users.get(key)
         return u["role"] if u else None
 
+    def display_of(self, key):
+        u = self._users.get(key)
+        return u["display"] if u else None
+
+    def keys_with_display(self, display):
+        d = (display or "").strip().lower()
+        return [k for k, u in self._users.items() if u["display"].strip().lower() == d]
+
     def list_users(self):
-        return [(n, u["role"]) for n, u in sorted(self._users.items())]
+        return [(k, u["display"], u["role"]) for k, u in sorted(self._users.items())]
+
+    @property
+    def admin_key(self):
+        return next((k for k, u in self._users.items() if u["role"] == "admin"), None)
 
     @property
     def has_admin(self):
-        return any(u["role"] == "admin" for u in self._users.values())
+        return self.admin_key is not None
 
-    # ── creazione ───────────────────────────────────────────────────────────--
-    def init_admin(self, name, pin):
-        """Chiamato DALL'INSTALLER. Crea l'UNICO admin e rifiuta se esiste gia':
-        e' questo che rende impossibile la duplicazione del PIN admin."""
-        with _LOCK:
-            if self.has_admin:
-                return False, "admin gia' esistente"
-            n = self._norm(name)
-            if not n or not pin:
-                return False, "nome o pin vuoto"
-            self._users[n] = {"role": "admin", "pin_hash": hash_pin(pin)}
-            self._save()
-            return True, n
+    # ── PIN ─────────────────────────────────────────────────────────────────--
+    def pin_in_use(self, pin):
+        """Uso INTERNO (no messaggi all'utente): il PIN combacia con qualcuno?"""
+        return any(verify_pin(pin, u["pin_hash"]) for u in self._users.values())
 
-    def add_secondary(self, name, pin):
-        """Nuovo utente secondario. Il controllo 'solo l'admin puo' crearlo' si fa
-        A MONTE (gate di ruolo nell'handler/guardiano), non qui."""
-        with _LOCK:
-            n = self._norm(name)
-            if not n or not pin:
-                return False, "nome o pin vuoto"
-            if n in self._users:
-                return False, "nome gia' esistente"
-            self._users[n] = {"role": "secondary", "pin_hash": hash_pin(pin)}
-            self._save()
-            return True, n
+    def generate_unique_pin(self, length=6):
+        """PIN alfanumerico generato con secrets, garantito NON in collisione con
+        nessun PIN esistente (incluso l'admin). Nessuna fuga: è generazione interna."""
+        for _ in range(10000):
+            pin = "".join(secrets.choice(_PIN_ALPHABET) for _ in range(length))
+            if not self.pin_in_use(pin):
+                return pin
+        raise RuntimeError("impossibile generare un PIN unico")  # praticamente mai
 
-    # ── verifica / identificazione ──────────────────────────────────────────--
-    def verify(self, name, pin):
-        u = self._users.get(self._norm(name))
+    def verify(self, key, pin):
+        u = self._users.get(key)
         return bool(u) and verify_pin(pin, u["pin_hash"])
 
+    def verify_admin(self, pin):
+        """Verifica il PIN CONTRO LA CHIAVE ADMIN (non 'primo che combacia').
+        Così un secondario con lo stesso PIN non viene mai preso per admin."""
+        k = self.admin_key
+        return bool(k) and verify_pin(pin, self._users[k]["pin_hash"])
+
     def identify_by_pin(self, pin):
-        """Dato un PIN, ritorna (nome, ruolo) della persona a cui appartiene,
-        o (None, None). E' QUESTO che usa il login di sessione: il PIN dice
-        CHI sei. Cosi' un secondario non puo' 'dichiararsi admin'."""
+        """Login di sessione: (key, role) o (None, None). I PIN sono unici per
+        costruzione (generati senza collisioni), quindi non c'è ambiguità."""
         if not pin:
             return None, None
-        for n, u in self._users.items():
-            if verify_pin(pin, u["pin_hash"]):
-                return n, u["role"]
+        # admin prima, per sicurezza
+        ak = self.admin_key
+        if ak and verify_pin(pin, self._users[ak]["pin_hash"]):
+            return ak, "admin"
+        for k, u in self._users.items():
+            if u["role"] != "admin" and verify_pin(pin, u["pin_hash"]):
+                return k, u["role"]
         return None, None
 
-    # ── eliminazione ──────────────────────────────────────────────────────────
-    def delete_user(self, name):
+    # ── creazione ───────────────────────────────────────────────────────────--
+    def init_admin(self, display, pin):
         with _LOCK:
-            n = self._norm(name)
-            u = self._users.get(n)
+            if self.has_admin:
+                return False, "admin già esistente"
+            if not (display or "").strip() or not pin:
+                return False, "nome o pin vuoto"
+            key = self._unique_key(display)
+            self._users[key] = {"display": display.strip(), "role": "admin",
+                                "pin_hash": hash_pin(pin)}
+            self._save()
+            return True, key
+
+    def create_secondary(self, display, pin):
+        with _LOCK:
+            if not (display or "").strip() or not pin:
+                return False, "nome o pin vuoto"
+            key = self._unique_key(display)
+            self._users[key] = {"display": display.strip(), "role": "secondary",
+                                "pin_hash": hash_pin(pin)}
+            self._save()
+            return True, key
+
+    # ── modifica / eliminazione ────────────────────────────────────────────--
+    def reset_pin(self, key, new_pin):
+        """Reset PIN di un secondario: GENERA un nuovo PIN, non rivela il vecchio
+        (gli hash non sono reversibili). L'admin non è una cassaforte di PIN altrui."""
+        with _LOCK:
+            u = self._users.get(key)
             if not u:
                 return False, "inesistente"
             if u["role"] == "admin":
-                return False, "non si elimina l'admin"   # protezione
-            del self._users[n]
+                return False, "il PIN admin lo cambia solo l'admin"
+            u["pin_hash"] = hash_pin(new_pin)
             self._save()
-            return True, n
+            return True, key
+
+    def delete_user(self, key):
+        """Elimina un secondario per intero. L'admin NON è eliminabile."""
+        with _LOCK:
+            u = self._users.get(key)
+            if not u:
+                return False, "inesistente"
+            if u["role"] == "admin":
+                return False, "l'identità admin non si elimina"
+            del self._users[key]
+            self._save()
+            return True, key
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Flusso /aggiungi_voce  (da chiamare SOLO in sessione admin — gate a monte)
+# Helper interni dei flussi
 # ══════════════════════════════════════════════════════════════════════════════
-def enroll_voice_profile(registry, speaker, record_fn, ask_fn, print_fn,
-                         lang="it", max_pin_attempts=2, ask_secret_fn=None):
-    """
-    Implementa lo spec:
-      comando -> nome -> esiste?
-         SI':  conferma il PIN ESISTENTE di quella persona (max 2 tentativi).
-               2 errati -> annulla, NESSUN profilo creato, NESSUN account nuovo.
-         NO :  nuovo PIN (con conferma) -> nuovo utente secondario.
-      La REGISTRAZIONE avviene SOLO DOPO che il PIN e' a posto -> mai profili orfani.
-
-    Iniezione di dipendenze (cosi' e' testabile senza audio/torch):
-      record_fn()        -> ritorna l'audio (o una lista di clip) gia' registrato.
-      ask_fn(prompt)     -> stringa (per il NOME, visibile).
-      ask_secret_fn(p)   -> stringa per i PIN, con input NASCOSTO. Se None, usa ask_fn.
-      print_fn(msg)      -> output.
-    Ritorna (ok: bool, messaggio: str).
-    """
-    ask_pin = ask_secret_fn or ask_fn
-    name = (ask_fn("  Nome utente (es. radostin): ") or "").strip().lower()
-    if not name:
-        return False, "nome non valido"
-
-    if registry.exists(name):
-        # ── persona esistente: prova d'identita' col SUO pin ──────────────────
-        ok = False
-        for left in range(max_pin_attempts, 0, -1):
-            pin = ask_pin(f"  PIN di {name} (conferma che sei tu): ")
-            if not pin:
-                print_fn("  Annullato.")
-                return False, "annullato"
-            if registry.verify(name, pin):
-                ok = True
-                break
-            if left > 1:
-                print_fn(f"  ❌ PIN errato — {left - 1} tentativo rimasto")
-        if not ok:
-            print_fn("  🔒 PIN errato. Annullato — nessun profilo, nessun account nuovo.")
-            return False, "pin errato"
-    else:
-        # ── persona nuova: nuovo PIN -> nuovo utente secondario ───────────────
-        pin1 = ask_pin(f"  Nuovo PIN per '{name}': ")
-        if not pin1:
-            print_fn("  Annullato.")
-            return False, "annullato"
-        pin2 = ask_pin("  Conferma PIN: ")
-        if pin1 != pin2:
-            print_fn("  ❌ I PIN non coincidono. Annullato.")
-            return False, "pin non coincidono"
-        created, info = registry.add_secondary(name, pin1)
-        if not created:
-            print_fn(f"  ❌ {info}")
-            return False, info
-
-    # ── REGISTRAZIONE: solo ora, identita' garantita ──────────────────────────
-    print_fn("  🎙️  Leggi il testo a voce naturale (~1 min 30).")
-    ask_fn("  (invio per iniziare la registrazione)")
-    audio = record_fn()
-    if audio is None or (hasattr(audio, "__len__") and len(audio) == 0):
-        print_fn("  ❌ Registrazione vuota — riprova /aggiungi_voce.")
-        return False, "registrazione vuota"
-
-    if speaker.add_profile(audio, name, lang):
-        print_fn(f"  ✅ Profilo '{name}' [{lang.upper()}] salvato.")
-        return True, name
-    print_fn("  ❌ Salvataggio profilo fallito.")
-    return False, "salvataggio fallito"
-
-
-def confirm_admin_pin(registry, ask_fn, print_fn, session_user, attempts=2):
-    """Rete sotto azioni irreversibili (es. eliminare un profilo): richiede il PIN
-    admin SUL MOMENTO, anche se la sessione e' gia' admin."""
+def _ask_admin_pin(registry, ask_pin, print_fn, attempts=2):
+    """PIN admin 'sul momento' — rete contro la sessione lasciata aperta."""
     for left in range(attempts, 0, -1):
-        pin = ask_fn("  Conferma il tuo PIN admin: ")
+        pin = ask_pin("  PIN admin (per autorizzare): ")
         if not pin:
             return False
-        if registry.verify(session_user, pin):
+        if registry.verify_admin(pin):
+            return True
+        if left > 1:
+            print_fn(f"  ❌ PIN admin errato — {left - 1} rimasto")
+    return False
+
+
+def _ask_person_pin(registry, key, ask_pin, print_fn, attempts=2):
+    """PIN della PERSONA (presente al microfono) — acconsente a toccare la sua voce."""
+    disp = registry.display_of(key) or key
+    for left in range(attempts, 0, -1):
+        pin = ask_pin(f"  PIN di {disp} (deve digitarlo {disp}): ")
+        if not pin:
+            return False
+        if registry.verify(key, pin):
             return True
         if left > 1:
             print_fn(f"  ❌ PIN errato — {left - 1} rimasto")
     return False
 
 
+def _langs_of(speaker, key):
+    try:
+        return [l for (n, l) in speaker.list_profiles() if n == key]
+    except Exception:
+        return []
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# Self-test (mock, niente audio/torch)
+# /aggiungi_voce
 # ══════════════════════════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    import tempfile
+def enroll_voice_profile(registry, speaker, record_fn, ask_fn, print_fn,
+                         session_user=None, lang="it", ask_secret_fn=None,
+                         max_pin_attempts=2):
+    """
+    Flusso completo. session_user = chiave admin della sessione (per la rete PIN admin).
+    Ritorna (ok, messaggio).
+    """
+    ask_pin = ask_secret_fn or ask_fn
 
-    class FakeSpeaker:
-        def __init__(self): self.saved = []
-        def add_profile(self, audio, name, lang):
-            self.saved.append((name, lang)); return True
+    # 1) PIN admin SEMPRE per primo.
+    if not _ask_admin_pin(registry, ask_pin, print_fn, max_pin_attempts):
+        print_fn("  🔒 PIN admin errato. Operazione annullata.")
+        return False, "admin pin"
 
-    def scripted_ask(answers):
-        it = iter(answers)
-        return lambda prompt="": next(it, "")
+    # 2) Etichetta.
+    display = (ask_fn("  Nome utente: ") or "").strip()
+    if not display:
+        return False, "nome vuoto"
 
-    tmp = Path(tempfile.mkdtemp()) / "users.json"
-    passed = 0
-    total = 0
+    keys = registry.keys_with_display(display)
 
-    def check(label, cond):
-        global passed, total
-        total += 1
-        passed += bool(cond)
-        print(f"{'ok ' if cond else 'XX '}{label}")
+    if not keys:
+        # ── persona NUOVA: PIN generato dal sistema ───────────────────────────
+        pin = registry.generate_unique_pin()
+        okc, target = registry.create_secondary(display, pin)
+        if not okc:
+            print_fn(f"  ❌ {target}")
+            return False, target
+        print_fn(f"  🔑 PIN di '{display}': {pin}  — consegnalo alla persona "
+                 f"(non sarà più mostrato).")
+    else:
+        # ── l'etichetta esiste già: decide l'ADMIN ────────────────────────────
+        choice = (ask_fn(f"  '{display}' esiste già — [s]tessa persona o [n]uova? ")
+                  or "").strip().lower()
+        if choice.startswith("n"):
+            pin = registry.generate_unique_pin()
+            okc, target = registry.create_secondary(display, pin)
+            if not okc:
+                print_fn(f"  ❌ {target}")
+                return False, target
+            print_fn(f"  🔑 Nuovo utente '{display}' (chiave {target}). PIN: {pin}")
+        else:
+            # stessa persona: quale chiave?
+            if len(keys) == 1:
+                target = keys[0]
+            else:
+                print_fn("  Quale? " + ", ".join(keys))
+                target = (ask_fn("  chiave: ") or "").strip().lower()
+                if target not in keys:
+                    print_fn("  ❌ chiave non valida.")
+                    return False, "chiave"
+            # PIN: se è l'admin che rifà la SUA voce, basta il PIN admin (già dato).
+            if registry.role_of(target) != "admin":
+                if not _ask_person_pin(registry, target, ask_pin, print_fn, max_pin_attempts):
+                    print_fn("  🔒 PIN della persona errato. Annullato.")
+                    return False, "person pin"
+            # lingua già presente? -> rifare?
+            if lang in _langs_of(speaker, target):
+                if not (ask_fn(f"  {target}_{lang} esiste già — rifare? [s/n] ")
+                        or "").strip().lower().startswith("s"):
+                    print_fn("  Annullato.")
+                    return False, "annullato"
 
-    # init admin + no duplicazione
-    reg = UserRegistry(tmp)
-    check("init_admin crea admin", reg.init_admin("radostin", "1234")[0] is True)
-    check("secondo admin rifiutato", reg.init_admin("altro", "9999")[0] is False)
-    check("identify_by_pin trova admin", reg.identify_by_pin("1234") == ("radostin", "admin"))
-    check("identify_by_pin pin ignoto -> None", reg.identify_by_pin("0000") == (None, None))
+    # 3) REGISTRAZIONE: solo ora, identità e consenso a posto -> mai profili orfani.
+    print_fn("  🎙️  Leggi il testo a voce naturale (~1 min 30).")
+    audio = record_fn()
+    if audio is None or (hasattr(audio, "__len__") and len(audio) == 0):
+        print_fn("  ❌ Registrazione vuota — riprova /aggiungi_voce.")
+        return False, "registrazione vuota"
 
-    # nuovo secondario via enroll
-    sp = FakeSpeaker()
-    ask = scripted_ask(["marco", "5678", "5678", ""])   # nome nuovo, pin, conferma, invio
-    ok, msg = enroll_voice_profile(reg, sp, lambda: [b"audio"], ask, lambda m: None)
-    check("nuovo utente: enroll ok", ok and reg.role_of("marco") == "secondary")
-    check("nuovo utente: profilo salvato", ("marco", "it") in sp.saved)
+    if speaker.add_profile(audio, target, lang):
+        print_fn(f"  ✅ Profilo '{registry.display_of(target)}' [{lang.upper()}] salvato.")
+        return True, target
+    print_fn("  ❌ Salvataggio profilo fallito.")
+    return False, "salvataggio fallito"
 
-    # utente esistente, pin corretto
-    sp2 = FakeSpeaker()
-    ask = scripted_ask(["marco", "5678", ""])
-    ok, _ = enroll_voice_profile(reg, sp2, lambda: [b"x"], ask, lambda m: None)
-    check("esistente pin giusto: profilo aggiunto", ok and ("marco", "it") in sp2.saved)
 
-    # utente esistente, pin sbagliato 2 volte -> annulla, niente salvataggio
-    sp3 = FakeSpeaker()
-    ask = scripted_ask(["marco", "0000", "1111"])
-    ok, _ = enroll_voice_profile(reg, sp3, lambda: [b"x"], ask, lambda m: None)
-    check("esistente 2 pin errati: annullato", ok is False and sp3.saved == [])
+# ══════════════════════════════════════════════════════════════════════════════
+# /profili_voce  (lista + due eliminazioni: voce-sola / account-intero + reset)
+# ══════════════════════════════════════════════════════════════════════════════
+def manage_profiles(registry, speaker, ask_fn, print_fn,
+                    session_user=None, ask_secret_fn=None, max_pin_attempts=2):
+    ask_pin = ask_secret_fn or ask_fn
 
-    # pin sbagliato NON crea account nuovo di ripiego
-    check("nessun account 'ripiego' creato", [n for n, _ in reg.list_users()] == ["marco", "radostin"])
+    if not _ask_admin_pin(registry, ask_pin, print_fn, max_pin_attempts):
+        print_fn("  🔒 PIN admin errato. Operazione annullata.")
+        return False, "admin pin"
 
-    # conferma del nuovo pin non coincide -> annulla, niente utente
-    sp4 = FakeSpeaker()
-    ask = scripted_ask(["luca", "1111", "2222"])
-    ok, _ = enroll_voice_profile(reg, sp4, lambda: [b"x"], ask, lambda m: None)
-    check("nuovo: pin non coincide -> annullato", ok is False and not reg.exists("luca"))
+    profiles = []
+    try:
+        profiles = speaker.list_profiles()
+    except Exception:
+        pass
+    print_fn("  Utenti: " + ", ".join(f"{k}({r})" for k, _d, r in registry.list_users()))
+    print_fn("  Profili vocali: " + (", ".join(f"{n}_{l}" for n, l in profiles) or "nessuno"))
 
-    # delete secondario ok, delete admin rifiutato
-    check("delete secondario ok", reg.delete_user("marco")[0] is True)
-    check("delete admin rifiutato", reg.delete_user("radostin")[0] is False)
+    action = (ask_fn("  [v] togli una voce  [a] elimina account  [r] reset PIN: ")
+              or "").strip().lower()
 
-    # confirm_admin_pin
-    check("confirm_admin_pin giusto", confirm_admin_pin(reg, scripted_ask(["1234"]), lambda m: None, "radostin") is True)
-    check("confirm_admin_pin sbagliato", confirm_admin_pin(reg, scripted_ask(["9", "9"]), lambda m: None, "radostin") is False)
+    # ── togli una voce (anche dell'admin: resta l'identità) ────────────────────
+    if action == "v":
+        key = (ask_fn("  chiave utente: ") or "").strip().lower()
+        lng = (ask_fn("  lingua (es. it): ") or "").strip().lower()
+        if not registry.exists(key):
+            print_fn("  ❌ utente inesistente."); return False, "inesistente"
+        if hasattr(speaker, "delete_profile") and speaker.delete_profile(key, lng):
+            print_fn(f"  ✅ Voce {key}_{lng} rimossa "
+                     + ("(identità admin intatta)" if registry.role_of(key) == "admin" else ""))
+            return True, "voce rimossa"
+        print_fn("  ❌ profilo non trovato."); return False, "no profilo"
 
-    print(f"\n{passed}/{total} test passati")
+    # ── elimina account intero (solo secondari) ────────────────────────────────
+    if action == "a":
+        key = (ask_fn("  chiave utente da eliminare: ") or "").strip().lower()
+        if registry.role_of(key) == "admin":
+            print_fn("  🔒 L'identità admin non si elimina.")
+            return False, "admin protetto"
+        # via tutte le sue voci, poi l'account
+        for lng in _langs_of(speaker, key):
+            if hasattr(speaker, "delete_profile"):
+                speaker.delete_profile(key, lng)
+        okd, info = registry.delete_user(key)
+        print_fn(f"  ✅ Account '{key}' eliminato." if okd else f"  ❌ {info}")
+        return okd, info
+
+    # ── reset PIN di un secondario (genera nuovo, non rivela il vecchio) ────────
+    if action == "r":
+        key = (ask_fn("  chiave utente: ") or "").strip().lower()
+        if registry.role_of(key) == "admin":
+            print_fn("  🔒 Il PIN admin non si resetta da qui.")
+            return False, "admin"
+        if not registry.exists(key):
+            print_fn("  ❌ inesistente."); return False, "inesistente"
+        newpin = registry.generate_unique_pin()
+        registry.reset_pin(key, newpin)
+        print_fn(f"  🔑 Nuovo PIN di '{key}': {newpin} — consegnalo alla persona.")
+        return True, "reset"
+
+    print_fn("  (niente)")
+    return False, "annullato"
+
+
+# Compat: la vecchia confirm_admin_pin usata altrove resta disponibile.
+def confirm_admin_pin(registry, ask_fn, print_fn, session_user=None, attempts=2):
+    return _ask_admin_pin(registry, ask_fn, print_fn, attempts)
