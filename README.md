@@ -1,22 +1,22 @@
 # JARVIS Desktop
 
-Assistente AI per Linux con chat desktop, comandi vocali opzionali e strumenti per lavorare con file, web e servizi configurati. Puoi usare Ollama in locale oppure collegare provider AI online.
+A Linux AI assistant with a desktop chat, optional voice control, and tools for working with files, the web, and configured services. Use Ollama locally or connect an online AI provider.
 
-> **Privacy:** con Ollama le richieste possono restare sul tuo computer. Se scegli un provider online, il testo della conversazione e i risultati degli strumenti usati nel compito vengono inviati a quel provider. La navigazione web richiede una connessione a Internet.
+> **Privacy:** With Ollama, requests can stay on your computer. When you choose an online provider, conversation text and the results of tools used for a task are sent to that provider. Web browsing requires an internet connection.
 
-## Funzionalità principali
+## Features
 
-- **Chat desktop** con cronologia salvata sul computer e impostazioni organizzate per categoria.
-- **Modelli locali o online:** Ollama, Groq, Cerebras, NVIDIA e OpenAI, con fallback configurabile.
-- **Strumenti per i compiti:** ricerca e lettura di file nella Home, informazioni sul sistema, comandi locali con controlli e conferme, ricerca web e memoria.
-- **Integrazioni facoltative:** voce, Gmail, Discord e server MCP locali.
-- **Controllo delle azioni:** le operazioni sensibili richiedono conferma; la creazione di file non sovrascrive quelli esistenti senza autorizzazione.
+- **Desktop chat** with conversations saved locally and settings organized by category.
+- **Local and online models:** Ollama, Groq, Cerebras, NVIDIA, and OpenAI, with configurable fallback.
+- **Task tools:** search and read files in your home directory, view system information, run local commands with safeguards and confirmations, search the web, and use memory.
+- **Optional integrations:** voice, Gmail, Discord, and local MCP servers.
+- **Action safeguards:** sensitive operations require confirmation; existing files are not overwritten without authorization.
 
-Le integrazioni opzionali potrebbero richiedere dipendenze, credenziali o configurazione aggiuntive. Consulta [Installazione](INSTALLATION.md) e [Changelog](CHANGELOG.md) per i dettagli.
+Optional integrations may require additional dependencies, credentials, or configuration. See the [installation guide](INSTALLATION.md) and [changelog](CHANGELOG.md) for details.
 
-## Installazione rapida
+## Quick start
 
-Requisiti: Linux, Git, Python 3 con `venv` e Tk; per la finestra desktop serve un ambiente grafico. Su Arch Linux, installa almeno `git`, `python` e `tk`.
+Requirements: Linux, Git, Python 3 with `venv` and Tk; a graphical desktop environment is needed for the desktop app. On Arch Linux, install at least `git`, `python`, and `tk`.
 
 ```sh
 git clone https://github.com/theinizializer/Jarvis.git
@@ -26,46 +26,46 @@ cd Jarvis
 jarvis
 ```
 
-Per avviare senza installare il comando nel menu:
+To launch without installing the application-menu command:
 
 ```sh
 ./avvia_jarvis.sh
 ```
 
-Per usare la modalità testuale:
+To use text mode:
 
 ```sh
 ./avvia_jarvis.sh --text
 ```
 
-La procedura dettagliata, inclusi i requisiti e le opzioni di ripristino, è in [INSTALLATION.md](INSTALLATION.md).
+For detailed requirements and recovery options, see [INSTALLATION.md](INSTALLATION.md).
 
-## Configurazione
+## Configuration
 
-Apri **Impostazioni** nell’app per configurare provider AI, lingua, profili e integrazioni. Per usare un modello online, inserisci la chiave API del provider scelto; per Ollama, installa e avvia Ollama con un modello compatibile.
+Open **Settings** in the app to configure AI providers, language, profiles, and integrations. To use an online model, enter an API key for the provider. To use Ollama, install it and make a compatible model available locally.
 
-JARVIS salva configurazione e dati nella directory utente:
+JARVIS stores configuration and data in your user directories:
 
-- Configurazione: `~/.config/jarvis` (o `$XDG_CONFIG_HOME/jarvis`)
-- Credenziali e dati: `~/.local/share/jarvis-data` (o `$XDG_DATA_HOME/jarvis-data`)
+- Configuration: `~/.config/jarvis` (or `$XDG_CONFIG_HOME/jarvis`)
+- Credentials and data: `~/.local/share/jarvis-data` (or `$XDG_DATA_HOME/jarvis-data`)
 
-Le credenziali sono conservate in un file `.env` con permessi limitati, ma **non sono cifrate**. Proteggi l’accesso al tuo account Linux e non condividere quel file.
+Credentials are stored in a `.env` file with restricted permissions, but **are not encrypted**. Protect access to your Linux account and do not share this file.
 
-## Verifiche
+## Tests
 
-Per eseguire i test:
+Run the test suite with:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-Altri controlli, compresi quelli che richiedono un ambiente grafico, sono descritti nei test del progetto.
+Additional checks, including tests that require a graphical environment, are documented alongside the project tests.
 
-## Documentazione e versioni
+## Documentation and versions
 
-- [Guida all’installazione](INSTALLATION.md)
-- [Novità e modifiche](CHANGELOG.md)
-- [Versione precedente (v9)](https://github.com/theinizializer/Jarvis/tree/old-v9)
-- [Firmware KyGlove](https://github.com/theinizializer/KyGlove)
+- [Installation guide](INSTALLATION.md)
+- [Changelog](CHANGELOG.md)
+- [Previous version (v9)](https://github.com/theinizializer/Jarvis/tree/old-v9)
+- [KyGlove firmware](https://github.com/theinizializer/KyGlove)
 
-JARVIS è distribuito con licenza [MIT](LICENSE).
+JARVIS is distributed under the [MIT License](LICENSE).
