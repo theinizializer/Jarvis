@@ -278,3 +278,26 @@ models/
 
 # ── Cache ─────────────────────────────────────────────────────────
 .cache/
+
+# Dati locali JARVIS v10
+.env*
+!.env.example
+users.json
+*.sqlite*
+*.db
+*.bak
+*.pem
+*.key
+*.enc
+.install-*
+.source-*/
+.runtime/
+.agents/
+.codex/
+.aws/
+backups/
+artifacts/
+output/
+graphify-out/
+kyglove-firmware/
+pubblicazione/

@@ -2,6 +2,10 @@
 
 All notable changes to JARVIS are documented here.
 
+## 10.10 — Desktop Linux
+
+Interfaccia desktop, skill KyGlove, installazione per utente e supporto a più provider. La v9 è archiviata in `old-v9`.
+
 ## [6.0.0] — 2025-04-02
 
 ### Added

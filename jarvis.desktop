@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=JARVIS
+Comment=Assistente AI personale
+Exec=jarvis
+Icon=jarvis
+Terminal=false
+StartupNotify=true
+StartupWMClass=jarvis
+Categories=Utility;Science;

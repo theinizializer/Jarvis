@@ -1,107 +1,27 @@
-# Installation Guide for Jarvis
+# Installare Jarvis v10 su Linux
 
-This document provides a detailed step-by-step installation guide for the Jarvis application on Linux, Windows, and macOS.
+Servono Git, Python 3 con venv e Tk, e un ambiente desktop Linux per la GUI. Su Arch i pacchetti di base sono git, python e tk.
 
-## System Requirements
-- **Operating System**: 
-  - **Linux**: Ubuntu 18.04 or higher
-  - **Windows**: Windows 10 or higher
-  - **macOS**: macOS Mojave or higher
-- **RAM**: Minimum 4GB (8GB recommended)
-- **Disk Space**: At least 1GB of free space
+```sh
+git clone https://github.com/theinizializer/Jarvis.git
+cd Jarvis
+./install.sh --dry-run
+./install.sh
+jarvis
+```
 
-## Dependencies
-Before installing Jarvis, ensure the following dependencies are installed on your system:
-- Python 3.6 or higher
-- Git
-- Virtual Environment (for Python)
+L'installer crea l'ambiente Python, registra il lanciatore nel menu e installa il comando in ~/.local/bin. La destinazione predefinita è ~/.local/share/jarvis-v10 (o XDG_DATA_HOME/jarvis-v10). Aggiungere ~/.local/bin al PATH se il comando non viene trovato. Per una postazione senza menu usare --no-desktop. Per installare dipendenze opzionali usare --desktop-effects, --voice e/o --vision. Per aggiornare, eseguire git pull --ff-only nel clone e rilanciare ./install.sh con gli stessi moduli opzionali.
 
-## Installing on Linux
-1. **Open Terminal.**  
-2. **Update Package List:**  
-   ```bash
-   sudo apt update
-   ```  
-3. **Install Dependencies:**  
-   ```bash
-   sudo apt install python3 git python3-venv
-   ```  
-4. **Clone the Repository:**  
-   ```bash
-   git clone https://github.com/theinizializer/Jarvis.git
-   cd Jarvis
-   ```  
-5. **Set Up Virtual Environment:**  
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```  
-6. **Install Required Packages:**  
-   ```bash
-   pip install -r requirements.txt
-   ```  
-7. **Run Jarvis:**  
-   ```bash
-   python main.py
-   ```  
+La v9 si trova nel ramo old-v9. Il comando globale jarvis e l'icona del menu avviano la v10 dopo l'installazione. Conservare la directory locale della v9 e il suo archivio cifrato per i servizi precedenti.
 
-## Installing on Windows
-1. **Open Command Prompt.**  
-2. **Install Dependencies:**  
-   You can download Python from [python.org](https://www.python.org/downloads/) and make sure to check the box to add Python to PATH during installation. 
-3. **Install Git:**  
-   Download Git from [git-scm.com](https://git-scm.com/download/win) and follow the installation instructions.
-4. **Clone the Repository:**  
-   ```cmd
-   git clone https://github.com/theinizializer/Jarvis.git
-   cd Jarvis
-   ```  
-5. **Set Up Virtual Environment:**  
-   ```cmd
-   python -m venv venv
-   venv\Scripts\activate
-   ```  
-6. **Install Required Packages:**  
-   ```cmd
-   pip install -r requirements.txt
-   ```  
-7. **Run Jarvis:**  
-   ```cmd
-   python main.py
-   ```  
+## Collegare il guanto
 
-## Installing on macOS
-1. **Open Terminal.**  
-2. **Install Homebrew:**  
-   If you haven't installed Homebrew yet, run:
-   ```bash
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   ```  
-3. **Install Dependencies:**  
-   ```bash
-   brew install python git
-   ```  
-4. **Clone the Repository:**  
-   ```bash
-   git clone https://github.com/theinizializer/Jarvis.git
-   cd Jarvis
-   ```  
-5. **Set Up Virtual Environment:**  
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```  
-6. **Install Required Packages:**  
-   ```bash
-   pip install -r requirements.txt
-   ```  
-7. **Run Jarvis:**  
-   ```bash
-   python main.py
-   ```  
+Per installare il firmware separato nella posizione riconosciuta dalla skill:
 
-## Troubleshooting
-- If you encounter issues, ensure all dependencies are correctly installed.
-- Check for error messages in the terminal and search for solutions based on that.
-- Ensure your Python version is up-to-date if you face compatibility errors.
-- Consult the [issues section](https://github.com/theinizializer/Jarvis/issues) on GitHub for common problems and solutions.
+```sh
+git clone https://github.com/theinizializer/KyGlove.git "${XDG_DATA_HOME:-$HOME/.local/share}/jarvis-v10/kyglove-firmware"
+cd "${XDG_DATA_HOME:-$HOME/.local/share}/jarvis-v10/kyglove-firmware"
+python3 prepara.py
+```
+
+Seguire i prerequisiti Arduino del README KyGlove. Inserire la password già configurata se si usa un guanto esistente. Per usare un clone in un altro percorso impostare KYGLOVE_ROOT nell'ambiente di Jarvis. Attivare KyGlove nelle impostazioni delle skill. Il repository del guanto contiene cablaggio, suite di test e spazio per gli STL.

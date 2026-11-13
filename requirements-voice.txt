@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+faster-whisper
+sounddevice
+soundfile
+numpy
+gTTS
+requests
+resemblyzer
+setuptools>=77,<81

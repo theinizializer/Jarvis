@@ -1,0 +1,4 @@
+pycairo>=1.26,<2
+dbus-next>=0.2.3,<0.3
+PySide6-Essentials>=6.8,<7
+cryptography>=43,<47
